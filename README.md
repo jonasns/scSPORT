@@ -1,2 +1,2 @@
-# scSPORT
-Single cell suppression profiling of human regulatory T cells
+# scSPOT
+Single cell suppression profiling of human regulatory T cells (Tregs)

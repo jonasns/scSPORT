@@ -1,0 +1,817 @@
+---
+title: "240321_scSPOT_code_PART3"
+output: html_notebook
+---
+
+#### Load required packages
+```{r}
+# load required packages
+library(readxl)
+library(cowplot)
+library(CATALYST)
+library(diffcyt)
+library(ggplot2)
+library(flowCore)
+library(reshape)
+library(ggrepel)
+library(premessa)
+library(flowCore)
+library(plyr)
+library(ggpubr)
+library(dplyr)
+library(stringr)
+library(RColorBrewer)
+library(ggrastr)
+library(viridis)
+library(MoMAColors)
+```
+
+```{r}
+sessionInfo()
+```
+
+#### re-load the recombined sce
+```{r}
+sce_recombined = readRDS("~/Desktop/231102_sce_recombined_scSPOT_summary.rds")
+```
+
+#### Define the seed for the entire workflow
+```{r}
+#set.seed for the whole workflow, use my_seed from now on
+my_seed <- 1234
+set.seed(my_seed)
+```
+
+#### cluster_id needs to be present for filterSCE (even though it's not used)
+```{r}
+sce_recombined$cluster_id = 1
+```
+
+## 240229 Calculate percentage of Treg subsets in nTreg culture
+```{r}
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_10x_nTreg"))
+sce_oi = filterSCE(sce_oi, subsets %in% c("eTreg", "nTreg", "Tfr"))
+sce_oi = filterSCE(sce_oi, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3")))
+table(sce_oi$condition, sce_oi$patient_id)
+```
+
+```{r}
+pc = plotCounts(sce_oi, 
+    prop = TRUE,
+    group_by = "patient_id", 
+    color_by = "subsets")
+pc
+```
+
+```{r}
+cols = c(brewer.pal(9,"Reds")[c(7)], brewer.pal(9,"Purples")[c(7)],brewer.pal(9,"Blues")[c(7)])
+
+datas = pc$data
+
+datas$subsets = factor(datas$subsets, levels = c("nTreg", "Tfr", "eTreg"))
+
+g = ggplot(data = datas,
+        aes(y = value*100, x = subsets)) +
+        geom_boxplot(width = 0.8, guides = FALSE, outlier.size = 0, alpha = 1, color = "black") +
+        geom_point(aes(fill = subsets, shape = patient_id), size = 2, alpha = 0.8, position = position_jitterdodge()) +
+        theme_bw() +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+    xlab("") +
+    ylab("% Treg subset in nTreg-culture") +
+    theme_bw(base_size = 14) +
+    scale_fill_manual(values=cols) +
+    scale_color_manual(values=cols) +
+  scale_shape_manual(values=c(21, 22, 23,24,25, 8, 11, 12, 13)) + expand_limits(y = 0)
+g
+```
+
+```{r}
+pdf(paste0("~/Desktop/240229_draft_figures/240229_percentage_Treg_subset_in_nTreg_culture.pdf"),width=3,height=2.5,paper='special') 
+g
+dev.off()
+```
+
+# Diffcyt 
+#### Add the info about cell types to the cluster codes
+Diffcyt need the cluster to be present in cluster codes. These are the original cluster codes (som100 and meta1-30)
+```{r}
+colnames(metadata(sce_recombined)$cluster_codes)
+```
+
+First replace the cluster_id value with the subsets name
+```{r}
+# how it originally looked like
+sce_recombined@colData$cluster_id
+
+# do the replacement
+sce_recombined@colData$cluster_id = sce_recombined@colData$subsets
+
+# how it looks like now
+sce_recombined@colData$cluster_id
+```
+
+### edit som100 names as well
+Here we are overwriting som100 with our cell subset ids. 
+We need to dig deep into the data structure of the sce to do this.
+N.B. for plotting etc in PART4 it is better to keep the original som100. We only do this to be able to use the diffcyt algorithm here
+```{r}
+# first the replacement in 3 steps
+sce_recombined@metadata$cluster_codes = sce_recombined@metadata$cluster_codes[1:length(levels(sce_recombined@colData$cluster_id)),]
+sce_recombined@metadata$cluster_codes[,1] = levels(sce_recombined@colData$cluster_id)
+sce_recombined@metadata$cluster_codes[,1] = as.factor(sce_recombined@metadata$cluster_codes[,1])
+
+#then check if it worked.
+sce_recombined@metadata$cluster_codes
+```
+
+# remove all Tregs from the analysis
+This depends on the analysis. For some comparisons they are not removed (e.g. CTLA4 blocking analysis). See the paper for details 
+```{r}
+sce_recombined = filterSCE(sce_recombined, !(subsets %in% c("eTreg", "nTreg", "Tfr")))
+```
+
+# remove channels that has more than one marker
+```{r}
+#See details about this in the paper methods
+sce_recombined <- sce_recombined[-which(rownames(sce_recombined) %in% c("CD45RO_Dead")), ]
+```
+Note, for the Treg subsets comparisons samples are from T4-T7, and all have CD21 in "CD21_CD3". So no need to remove
+
+
+## comparison 1 - 0x versus 20k eTreg
+## selecting only conditions that should be compared
+Before running diffcyt, the conditions that will be used for the final figures should be selected.
+More or less conditions affects the significance results, because we are correcting for multiple testing.
+If your final figure is e.g. only one inhibitor we should exclude all others at this stage.
+```{r}
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_0x_Treg", "stim_10x_eTreg", "stim_10x_nTreg", "stim_10x_Tfr"))
+```
+
+```{r}
+# make a table, to see which of the replicates has all conditions being compared. And subset to these replicates
+table(sce_oi$patient_id, sce_oi$condition)
+```
+
+```{r}
+sce_oi = filterSCE(sce_oi, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3")))
+```
+
+```{r}
+# check again that we filtered correctly
+table(sce_oi$patient_id, sce_oi$condition)
+```
+
+Even though diffcyt statistics depends on all input conditions, it is only possible to do pairwise comparisons (i.e. two conditions at the same time). 
+
+```{r}
+# get the metadata from the "experiment info - ei"
+md <- ei(sce_oi)
+
+# define the base condition to compare to. E.g. a condition without any Tregs
+md$condition <- relevel(md$condition, ref = "stim_0x_Treg")
+
+# create a design matrix. Here we want to compare conditions, but taking into account patient differences 
+design <- createDesignMatrix(md, cols_design = c("condition", "patient_id"))
+
+# contrast is where you select the condition to compare the base condition to
+# it is easier to adjust the number of contrast using the error message you get if it is incorrect
+# it is also easier to place the 1 correctly after seeing the below data frame
+# so just keep running this chunk till it is correct
+contrast <- createContrast(c(0,1,0,0,0,0,0,0,0,0,0,0))
+data.frame(parameters = colnames(design), contrast)
+```
+
+## run the diffcyt algorithm
+```{r}
+# DA comparisons are always the cell type. 
+# we have to select som100 as the clustering to use because we added the cell type info to this column of the cluster codes
+# usually for DA we use the edgeR statistics, but there are other options
+
+res_DA <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DA", 
+                  method_DA = "diffcyt-DA-edgeR",
+                  design = design, 
+                  contrast = contrast,
+                  verbose = TRUE)
+
+# DS analysis is all the markers on all the cells
+# also here we have to chose som100
+# Instead of edgeR we use limma statistics, but there are other options
+# diffcyt standard code is to test only the state markers. To overrule this, edit the markers to test. 
+
+res_DS <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DS", 
+                  method_DS = "diffcyt-DS-limma",
+                  design = design, 
+                  contrast = contrast,
+                  markers_to_test = T, #Note! This will include all markers instead of just state markers!
+                  verbose = TRUE)
+
+# afterwards make tables of the results
+tbl_DA1 <- rowData(res_DA$res)
+tbl_DS1 <- rowData(res_DS$res)
+```
+
+#### Plot a Heatmap of the DA results
+```{r fig.width = 10}
+# again we have to select som100.
+# all is used to select all cell types instead of only significant ones
+plotDiffHeatmap(sce_oi, 
+                tbl_DA1,
+                k = "som100",
+                all = TRUE, #logical specifying whether all top_n results should be displayed. If TRUE, fdr,lfc filtering is skipped.
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DA results
+I find it easier to overview the results from a volcano plot. 
+Below is ggplot code to make a volcano plot of the results.
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DA1)
+
+# to give colours dependent on significance we first subset a bit based on desired cutoffs 
+# it is recommended to use the adjusted p value (adjusted for multiple testing, p_adj). 
+vp_sign_up = subset(vp, logFC>0 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<0 & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 )
+vp_name1 = subset(vp, p_adj<0.05)
+vp_name2 = subset(vp, abs(logFC)>0.3 & p_adj>0.05)
+
+# the plot is first made with three similar pieces of code to differentally colour the non-significant, the up-regulated, and the downregulated cell types
+# afterwards we add text identifiers to cells also selected by cutoff above.
+
+vp_plot1= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = logCPM),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Blues")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Blues")[5],
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name1,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    geom_text_repel(
+      data = vp_name2,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 4,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                                   eTreg") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot1
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_eTreg_Cell_volcano.pdf",width=5.33,height=4,paper='special') 
+vp_plot1
+dev.off()
+```
+
+
+#### Plot a Heatmap of the DS results
+DS plots are similar to DA, except now we are plotting the markers
+```{r fig.width = 10}
+plotDiffHeatmap(sce_oi, 
+                tbl_DS1,
+                k = "som100",
+                fdr = 0.1, 
+                all = T, #logical specifying whether all top_n results should be displayed. If TRUE, fdr,lfc filtering is skipped.
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DS results
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DS1)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+# the name will be a combination of the cell type and the marker
+vp$name =  paste("(",vp$cluster_id,"_",vp$marker_id,")")
+vp$name = gsub(" ", "", vp$name, fixed = TRUE)
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, logFC>log(1.25,2) & p_adj<0.05 | logFC>0.33 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<(-log(1.25,2)) & p_adj<0.05 | logFC<(-0.33) & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 | abs(logFC)<log(1.25,2))
+vp_name = subset(vp, abs(logFC)>log(1.25,2) & p_adj<0.05 | abs(logFC)>0.33 & p_adj<0.05)
+
+
+vp_plot2= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = AveExpr),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Blues")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Blues")[5],
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = logFC, -log10(p_adj), label=name),
+      size = 3,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                                                 eTreg") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot2
+```
+
+```{r}
+pdf("~/Desktop/240314_draft_figures/240315_eTreg_Markers_volcano.pdf",width=6,height=4.5,paper='special') 
+vp_plot2
+dev.off()
+```
+
+## comparison 2 - 0x versus 20k nTreg
+```{r}
+# get the metadata from the "experiment info - ei"
+md <- ei(sce_oi)
+
+# define the base condition to compare to. E.g. DMSO
+md$condition <- relevel(md$condition, ref = "stim_0x_Treg")
+
+# create a design matrix. Here we want to compare conditions, but taking into account patient differences 
+design <- createDesignMatrix(md, cols_design = c("condition", "patient_id"))
+
+# contrast is where you select the condition to compare the base condition to
+contrast <- createContrast(c(0,0,1,0,0,0,0,0,0,0,0,0))
+data.frame(parameters = colnames(design), contrast)
+```
+
+## run the diffcyt algorithm
+```{r}
+res_DA <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DA", 
+                  method_DA = "diffcyt-DA-edgeR",
+                  design = design, 
+                  contrast = contrast,
+                  verbose = TRUE)
+
+res_DS <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DS", 
+                  method_DS = "diffcyt-DS-limma",
+                  design = design, 
+                  contrast = contrast,
+                  markers_to_test = T, #Note! This will include all markers instead of just state markers!
+                  verbose = TRUE)
+
+# afterwards make tables of the results
+tbl_DA2 <- rowData(res_DA$res)
+tbl_DS2 <- rowData(res_DS$res)
+```
+
+#### Plot a Heatmap of the DA results
+```{r fig.width = 10}
+plotDiffHeatmap(sce_oi, 
+                tbl_DA2,
+                k = "som100",
+                all = TRUE, 
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DA results
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DA2)
+
+vp_sign_up = subset(vp, logFC>0 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<0 & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 )
+vp_name1 = subset(vp, p_adj<0.05)
+vp_name2 = subset(vp, abs(logFC)>0.3 & p_adj>0.05)
+
+vp_plot3= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = logCPM),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Reds")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Reds")[5],
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name1,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    geom_text_repel(
+      data = vp_name2,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 4,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                 nTreg") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot3
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_nTreg_Cell_volcano.pdf",width=5.33,height=4,paper='special') 
+vp_plot3
+dev.off()
+```
+
+#### Plot a Heatmap of the DS results
+```{r fig.width = 10}
+plotDiffHeatmap(sce_oi, 
+                tbl_DS2,
+                k = "som100",
+                fdr = 0.1, 
+                all = T, 
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DS results
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DS2)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+# the name will be a combination of the cell type and the marker
+vp$name =  paste("(",vp$cluster_id,"_",vp$marker_id,")")
+vp$name = gsub(" ", "", vp$name, fixed = TRUE)
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, logFC>log(1.25,2) & p_adj<0.05 | logFC>0.33 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<(-log(1.25,2)) & p_adj<0.05 | logFC<(-0.33) & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 | abs(logFC)<log(1.25,2))
+vp_name = subset(vp, abs(logFC)>log(1.25,2) & p_adj<0.05 | abs(logFC)>0.33 & p_adj<0.05)
+
+vp_plot4= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = AveExpr),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Reds")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Reds")[5],
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = logFC, -log10(p_adj), label=name),
+      size = 3,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                                                 nTreg") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot4
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_nTreg_Markers_volcano.pdf",width=6,height=4.5,paper='special') 
+vp_plot4
+dev.off()
+```
+
+## comparison 3 - 0x versus 20k Tfr
+## selecting only conditions that should be compared
+```{r}
+# get the metadata from the "experiment info - ei"
+md <- ei(sce_oi)
+
+# define the base condition to compare to. E.g. DMSO
+md$condition <- relevel(md$condition, ref = "stim_0x_Treg")
+
+# create a design matrix. Here we want to compare conditions, but taking into account patient differences 
+design <- createDesignMatrix(md, cols_design = c("condition", "patient_id"))
+
+# so just keep running this chunk till it is correct
+contrast <- createContrast(c(0,0,0,1,0,0,0,0,0,0,0,0))
+data.frame(parameters = colnames(design), contrast)
+```
+
+## run the diffcyt algorithm
+```{r}
+res_DA <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DA", 
+                  method_DA = "diffcyt-DA-edgeR",
+                  design = design, 
+                  contrast = contrast,
+                  verbose = TRUE)
+
+res_DS <- diffcyt(sce_oi,
+                  clustering_to_use = "som100",
+                  analysis_type = "DS", 
+                  method_DS = "diffcyt-DS-limma",
+                  design = design, 
+                  contrast = contrast,
+                  markers_to_test = T, #Note! This will include all markers instead of just state markers!
+                  verbose = TRUE)
+
+# afterwards make tables of the results
+tbl_DA3 <- rowData(res_DA$res)
+tbl_DS3 <- rowData(res_DS$res)
+```
+
+#### Plot a Heatmap of the DA results
+```{r fig.width = 10}
+plotDiffHeatmap(sce_oi, 
+                tbl_DA3,
+                k = "som100",
+                all = TRUE, #logical specifying whether all top_n results should be displayed. If TRUE, fdr,lfc filtering is skipped.
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DA results
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DA3)
+
+vp_sign_up = subset(vp, logFC>0 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<0 & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 )
+vp_name1 = subset(vp, p_adj<0.05)
+vp_name2 = subset(vp, abs(logFC)>0.3 & p_adj>0.05)
+
+vp_plot5= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = logCPM),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Purples")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = logCPM),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Purples")[5],
+      color = "black",
+      pch = 21
+    ) +
+      geom_text_repel(
+      data = vp_name1,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    geom_text_repel(
+      data = vp_name2,
+      aes(x = logFC, -log10(p_adj), label=cluster_id),
+      size = 4,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 10
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                       Tfr") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot5
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_Tfr_Cell_volcano.pdf",width=5.33,height=4,paper='special') 
+vp_plot5
+dev.off()
+```
+
+#### Plot a Heatmap of the DS results
+DS plots are similar to DA, except now we are plotting the markers
+```{r fig.width = 10}
+plotDiffHeatmap(sce_oi, 
+                tbl_DS3,
+                k = "som100",
+                fdr = 0.1, 
+                all = T, 
+                sort_by = "lfc",
+                assay = "exprs",
+                fun = "median",
+                normalize = T,
+                col_anno = T, 
+                row_anno = T, 
+                lfc_pal = c("Navy", "white", "red"), 
+                fdr_pal = c("lightgrey", "gold")
+                )
+```
+
+#### Plot a Volcano plot of the DS results
+```{r, fig.height=5,fig.width=8}
+vp = as.data.frame(tbl_DS3)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+# the name will be a combination of the cell type and the marker
+vp$name =  paste("(",vp$cluster_id,"_",vp$marker_id,")")
+vp$name = gsub(" ", "", vp$name, fixed = TRUE)
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, logFC>log(1.25,2) & p_adj<0.05 | logFC>0.33 & p_adj<0.05)
+vp_sign_dn = subset(vp, logFC<(-log(1.25,2)) & p_adj<0.05 | logFC<(-0.33) & p_adj<0.05)
+vp_non_sign = subset(vp, p_adj>0.05 | abs(logFC)<log(1.25,2))
+vp_name = subset(vp, abs(logFC)>log(1.25,2) & p_adj<0.05 | abs(logFC)>0.33 & p_adj<0.05)
+
+
+vp_plot6= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -log10(p_adj),size = AveExpr),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Purples")[7],
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, -log10(p_adj), size = AveExpr),
+      alpha = 0.8,
+      fill = brewer.pal(9,"Purples")[5],
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = logFC, -log10(p_adj), label=name),
+      size = 3,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="", x = "logFC", y = "-log10(p_adj)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("no Treg                                                       Tfr") +     geom_vline(xintercept=0, linetype='dotted', col = 'black')
+
+vp_plot6
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_Tfr_Markers_volcano.pdf",width=6,height=4.5,paper='special') 
+vp_plot6
+dev.off()
+```
+
+```{r}
+STOP
+```
+
+There are other comparisons done in the paper, but the code is quite repetitive, so it is not included here.

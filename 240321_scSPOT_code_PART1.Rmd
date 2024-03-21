@@ -1,0 +1,1508 @@
+---
+title: "240321_scSPOT_code_PART1"
+output: html_notebook
+---
+
+This will show the time of when you started. In the end we are also printing the time. So if you run everything at once you can check how long it took.
+```{r}
+print(Sys.time())
+```
+
+# Premessa used for pre-processing, and panel editing
+quoted out with # after initial use
+```{r}
+#In the pop up, click the ones to remove. Including bar-coding and DNA. 
+library(premessa)
+paneleditor_GUI()
+```
+
+#### Define working directory
+```{r setup}
+###This need to be set to where the FCS files are
+knitr::opts_knit$set(root.dir = '~/Desktop/all_fcs/renamed/')
+```
+
+#### Load required packages
+```{r}
+# load required packages
+library(readxl)
+library(cowplot)
+library(CATALYST)
+library(diffcyt)
+library(ggplot2)
+library(flowCore)
+library(reshape)
+library(ggrepel)
+library(flowCore)
+library(plyr)
+library(ggpubr)
+library(MASS)
+library(pheatmap)
+library(stringr)
+library(RColorBrewer)
+library(gridExtra)
+library(ggrastr)
+library(viridis)
+```
+
+It is important to print the version of the packages used
+```{r}
+sessionInfo()
+```
+
+#### Define the seed for the entire workflow
+```{r}
+#set.seed for the whole workflow, use my_seed from now on
+my_seed <- 1234
+set.seed(my_seed)
+```
+
+### import fcs files as a flowset
+```{r}
+fcs_files <- list.files(pattern = ".fcs$")
+fs <- read.flowSet(fcs_files, transformation = FALSE, truncate_max_range = FALSE)
+fs
+fcs_files
+```
+
+### import metadata
+```{r}
+#metadata file should be in the in working directory. Needs to have sample_id, condition, and patient_id. It is possible to add even more if desired
+md <- read_excel("Totalcell_metadata.xlsx")                                  
+md
+```
+
+### import panel data
+```{r}
+#panel information in the working directory, type markers are used for clustering
+panel <- "Totalcell_panel.xlsx"                           
+panel <- read_excel(panel)
+panel 
+```
+
+```{r}
+# check that all panel columns are in the flowSet object. Last two commands should be TRUE
+sort(panel$fcs_colname)
+sort(colnames(fs))
+all(panel$fcs_colname %in% colnames(fs))  
+all(colnames(fs) %in% panel$fcs_colname)  
+```
+
+### Build the SingleCellExperiment from the fcs files, metadata, and panel information
+```{r}
+#build the sce
+sce <- prepData(fs, panel, md)
+```
+
+# Compensation
+### import the comp bead fcs file
+```{r}
+setwd('~/Desktop/Compensation beads/renamed/')
+fcs_bead <- list.files(pattern = ".fcs$")
+ff <- read.FCS(fcs_bead, transformation=FALSE)
+```
+
+## make an sce with the comp beads
+```{r}
+sce_beads <- prepData(ff)
+```
+
+### Debarcode the beads
+Using CATALYSTs internal debarcoder
+```{r}
+#bc_ms barcode masses. Should contain all mass numbers used in the barcode experiment. 
+bc_ms <- c(89, 106, 110:116, 127, 141:176, 194:196, 198, 209) 
+sce_beads <- assignPrelim(sce_beads, bc_ms, verbose = T)
+sce_beads <- applyCutoffs(estCutoffs(sce_beads))
+```
+
+```{r}
+# view number of events assigned to each barcode population
+table(sce_beads$bc_id)
+```
+
+```{r}
+# compute & extract spillover matrix
+sce_beads <- computeSpillmat(sce_beads)
+sm <- metadata(sce_beads)$spillover_matrix
+```
+
+#### plot the spillover matrix
+```{r, fig.width=6, fig.height=4}
+plotSpillmat(sce_beads, sm = sm)
+```
+If the spillover matrix (SM) does not contain the same set of columns as the input experiment, it will be adapted according to the following rules:
+
+1. columns present in the SM but not in the input data will be removed from it
+2. non-metal columns present in the input but not in the SM will be added such that they do neither receive nor cause spill
+3. metal columns that have the same mass as a channel present in the SM will receive (but not emit) spillover according to that channel
+4. if an added channel could potentially receive spillover (as it has +/-1M or +16M of, or is of the same metal type as another channel measured), a warning will be issued as there could be spillover interactions that have been missed and may lead to faulty compensation
+
+```{r}
+# compensate in CATALYST using NNLS-method; keep uncompensated data
+sce_1 <- compCytof(sce, sm_co, method = "nnls", overwrite = FALSE)
+```
+
+```{r}
+#visualize data before & after compensation
+chs <- c("Dy162Di", "Dy163Di")
+as <- c("exprs", "compexprs")
+ps <- lapply(as, function(a) 
+    plotScatter(sce_1, chs, assay = a, label = "both")+ xlim(0.0000,10) + ylim(0.0000,10))
+plot_grid(plotlist = ps, nrow = 1)
+```
+
+### check all compensations
+```{r}
+all_channels = rownames(metadata(sce_beads)$spillover_matrix)
+all_channels
+
+assay_channels = panel$fcs_colname
+assay_channels
+```
+
+```{r}
+smp = plotSpillmat(sce_beads)
+
+smp = as.data.frame(smp$data)
+
+# Select channels with spillover value higher than zero
+channels_with_spillover <- subset(smp, spill > 0 & spill < 1)
+
+plots_list <- list()
+
+# Iterate over combinations of channels with spillover
+for (i in 1:nrow(channels_with_spillover)) {
+
+  emitting_channel <- channels_with_spillover[i, 1]
+  receiving_channel <- channels_with_spillover[i, 2]
+  
+  # Check if both emitting and receiving channels are present in the assays
+  if (emitting_channel %in% assay_channels && receiving_channel %in% assay_channels) {
+    
+    # Plot compensated data
+    plot_compensated <- plotScatter(sce_1, c(as.character(emitting_channel), as.character(receiving_channel)), assay = "compexprs", label = "both") + xlim(0, 10) + ylim(0, 10) +ggtitle("compensated")
+    
+    # Plot uncompensated data
+    plot_uncompensated <- plotScatter(sce_1, c(as.character(emitting_channel), as.character(receiving_channel)), assay = "exprs", label = "both") + xlim(0, 10) + ylim(0, 10)+ggtitle("uncompensated")
+    
+    # Store individual plots in the list
+    plots_list <- c(plots_list, list(plot_uncompensated, plot_compensated))
+    
+  }
+}
+```
+
+```{r}
+#print pdf to file
+pdf("~/Desktop/240110_compensation_channels.pdf",width=12,height=88,paper='special') 
+grid.arrange(grobs = plots_list, ncol = 6)
+dev.off()
+```
+
+```{r}
+# generate a sce where the exprs is overwritten by the compensated values
+#this is actually a bug in the CATALYST code, because the "cluster" function does not allow selecting the assay = compexprs. So we cannot keep both values unfortunately. 
+sce_comp <- compCytof(sce, sm_co, method = "nnls", overwrite = TRUE)
+```
+
+```{r}
+# save the sce
+saveRDS(sce_comp,"231027_sce_comp_scSPORT_summary.rds")
+```
+
+```{r}
+# reload the sce
+sce_comp = readRDS("231027_sce_comp_scSPORT_summary.rds")
+```
+
+```{r}
+#continue with the compensated dataset (or NOT - comment it out)
+sce = sce_comp
+```
+
+## setting type-markers 
+Here we are changing which markers to use for the clustering (instead of in the Excel sheet).
+First all markers are set to "state"
+Then the ones we want to use are change to "type".
+```{r}
+rowData(sce)$marker_class = "state"
+rowData(sce[c("CD4","CD8","CD19","CyclinB1","IgD","PDL1","Tbet","CXCR5","Puro","CD86","CytC","CD11c","HLA_DR")])$marker_class = "type"
+```
+
+## conduct FlowSOM clustering
+```{r}
+set.seed(my_seed)
+sce <- cluster(sce, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+## Number of cells measured per sample
+```{r, fig.width = 8, fig.height = 2}
+pc = plotCounts(sce, 
+    group_by = "sample_id", 
+    color_by = "condition")
+pc
+```
+
+### re-ording samples for the plot
+```{r, eval =F}
+#first make a list containing the sample IDs
+sample_id_list = levels(sce$sample_id)
+sample_id_list = as.data.frame(sample_id_list)
+sample_id_list$number = c(1:length(levels(sce$sample_id)))
+sample_id_list
+```
+
+```{r}
+#Then order the samples as desired:
+sample_id_1 = sample_id_list[21,1]
+sample_id_2 = sample_id_list[20,1]
+sample_id_3 = sample_id_list[4,1]
+sample_id_4 = sample_id_list[14,1]
+sample_id_5 = sample_id_list[15,1]
+sample_id_6 = sample_id_list[16,1]
+sample_id_7 = sample_id_list[13,1]
+sample_id_8 = sample_id_list[10,1]
+sample_id_9 = sample_id_list[12,1]
+sample_id_10 = sample_id_list[9,1]
+sample_id_11 = sample_id_list[11,1]
+sample_id_12 = sample_id_list[5,1]
+sample_id_13 = sample_id_list[2,1]
+sample_id_14 = sample_id_list[3,1]
+sample_id_15 = sample_id_list[1,1]
+sample_id_16 = sample_id_list[7,1]
+sample_id_17 = sample_id_list[8,1]
+sample_id_18 = sample_id_list[6,1]
+sample_id_19 = sample_id_list[18,1]
+sample_id_20 = sample_id_list[19,1]
+sample_id_21 = sample_id_list[17,1]
+
+sample_id_list2 = c(sample_id_1, sample_id_2, sample_id_3, sample_id_4, sample_id_5, sample_id_6, sample_id_7, sample_id_8, sample_id_9, sample_id_10, sample_id_11, sample_id_12, sample_id_13, sample_id_14, sample_id_15, sample_id_16, sample_id_17, sample_id_18, sample_id_19, sample_id_20, sample_id_21)
+sample_id_list2
+```
+
+### plotting the counts with ggplot2
+```{r, fig.width = 2, fig.height= 1.5, eval =F}
+#Defining colours to use
+col_order = c(brewer.pal(8,"Greys")[c(4:6)], brewer.pal(8,"Reds")[c(4:7)], brewer.pal(8,"Blues")[c(4:7)],brewer.pal(8,"Greys")[c(8)], brewer.pal(8,"Greens")[c(4:6)], brewer.pal(8,"Purples")[c(4:6)],brewer.pal(8,"Oranges")[c(4:6)])
+
+#extract data from previous count plot and order by the list made above
+pc$data$sample_id = factor(pc$data$sample_id, levels = sample_id_list2)
+
+# actual ggplot
+g = ggplot(data = pc$data,
+        aes(y = value, x = sample_id)) +
+        geom_bar(aes(fill = sample_id), stat="identity", width = 0.8, guides = FALSE, outlier.size = 0, alpha = 1, color = "black") +
+        geom_point(aes(fill = sample_id), size = 2, alpha = 0.8, shape = 21, position = position_jitterdodge()) +
+        scale_y_continuous(limits = c(0, max(pc$data$value))) +
+        theme_bw() +
+        labs(y="n_cells", x = "") +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order)
+g
+```
+
+```{r}
+#print pdf to file
+pdf("~/Desktop/221110_total_cell_numbers.pdf",width=4,height=3.5,paper='special') 
+g
+dev.off()
+```
+
+
+## Pseudobulk-level MDS plot
+A multi-dimensional scaling (MDS) plot will give a sense of similarities between cluster and/or samples in an unsupervised way and of key difference in expression before conducting any formal testing. It is a bit similar to PCA
+
+```{r, fig.width = 8, fig.height=6}
+pbMDS(sce, by = "sample_id")
+```
+
+## Heatmap of marker expressions
+```{r fig.width = 10, fig.height=6}
+plotExprHeatmap(sce, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta20", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+```
+
+```{r fig.width = 10, fig.height=6}
+plotExprHeatmap(sce, 
+                features = "state",
+                by = "cluster_id", 
+                k = "meta20", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+```
+
+# Dimensionality reduction (UMAP)
+The number of cells in cytometry data is typically large, and for visualization of cells in a two-dimensional space it is often sufficient to run dimension reductions on a subset of the data. 
+To make results reproducible, the random seed should be set before computing reduced dimensions. 
+Inside the runDR algorithm there is an additional seed-changer. So we also set the seed after, not to affect the below graphs.
+```{r}
+print(Sys.time())
+
+set.seed(my_seed)
+sce <- runDR(sce, 
+             dr = "UMAP", 
+             cells = 1000, 
+             features = "type",
+             n_neighbors = 10) 
+set.seed(my_seed)
+
+print(Sys.time())
+```
+
+### plot the results coloured by metadata and clustering
+```{r, fig.height=8, fig.width=12}
+plotDR(sce, dr = "UMAP", color_by = "meta20")
+```
+
+## Highlight specific markers expression on the UMAP
+```{r, fig.height=10, fig.width=16}
+#plotting only type markers
+plotDR(sce, 
+       dr = "UMAP", 
+       color_by = type_markers(sce),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+```{r, fig.height=5, fig.width=5}
+plotDR(sce, dr = "UMAP", color_by = "meta20")
+```
+
+
+```{r, fig.height=12, fig.width=16}
+#plotting only state markers
+plotDR(sce, 
+       dr = "UMAP", 
+       color_by = state_markers(sce),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+## Merging of clusters into specific cell types
+Note! You have to manually make the merging table based on the above clustering
+```{r}
+merging_table <- read_excel("merging_table1.xlsx")                             
+merging_table 
+sce <- mergeClusters(sce, k = "meta20", table = merging_table, id = "merging1", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=8, fig.width=24}
+plot_grid(ncol = 2,
+  (plotDR(sce, dr = "UMAP", color_by = "meta20")),
+  (plotDR(sce, dr = "UMAP", color_by = "merging1"))
+  )
+```
+
+### plot the UMAP, setting it as p
+```{r}
+p = plotDR(sce, dr = "UMAP", color_by = "meta20")
+```
+
+```{r}
+# see the CATALYST colours
+scales::show_col(CATALYST:::.cluster_cols)
+```
+
+### plot with rasterized points and different colours for a publication grade figure
+```{r}
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = meta20, fill = meta20)) +
+  geom_point_rast(aes(x, y, colour = meta20, fill = meta20), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_UMAP_meta20.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+
+```{r}
+p = plotDR(sce, dr = "UMAP", color_by = "merging1")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = merging1, fill = merging1)) +
+  geom_point_rast(aes(x, y, colour = merging1, fill = merging1), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_UMAP_merging1.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+
+### plotting heatmap after clustering
+```{r fig.width = 10, fig.height=6}
+peh = plotExprHeatmap(sce, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging1", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+peh
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_merging1_heat.pdf",width=6.2,height=2,paper='special') 
+peh
+dev.off()
+```
+
+### UMAP density plot
+```{r, fig.height=5,fig.width=8}
+# split by condition
+p =　plotDR(sce, dr = "UMAP", color_by = "merging1", facet_by = "patient_id") 
+p + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 8) +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  theme_classic()
+```
+
+```{r, fig.height=5,fig.width=8}
+#UMAP density plot (nlevel for scaling each plot individually)
+p =　plotDR(sce, dr = "UMAP", color_by = "merging1", facet_by = "patient_id") 
+p + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(nlevel)), colour = "black",
+                  bins = 8) +
+  scale_fill_distiller(palette = "Blues", direction = 1) +
+  theme_classic()
+```
+
+#### Add the info about cell types to the metadata
+This is not in the CATALYST workflow, but is used for manual ggplots etc. 
+```{r}
+#inspiration from: https://stackoverflow.com/questions/35636315/replace-values-in-a-dataframe-based-on-lookup-table
+df = as.data.frame(sce@colData$cluster_id)
+lookup = sce@metadata$cluster_codes
+new <- df  # create a copy of df
+
+# using lapply, loop over columns and match values to the look up table. store in "new".
+new[] <- lapply(df, function(x) lookup$merging1[match(x, lookup$som100)])
+
+sce$merging1 = new$`sce@colData$cluster_id`
+```
+
+Now we can facet by the new cell type clusters and plot other types of graphs
+```{r}
+# UMAP split by cell type
+plotDR(sce, dr = "UMAP", color_by = "merging1",facet_by = "merging1")
+```
+
+```{r, fig.height=8, fig.width = 6}
+#relative abundance split by cell type
+plotAbundances(sce, k = "merging1", by = "sample_id", group_by = "patient_id")
+```
+
+```{r,fig.width = 6, fig.height = 6}
+#MDS plot labelled by cell types
+pbMDS(sce, k = "merging1", by = "cluster_id", label_by = "cluster_id")
+```
+
+### cleanup
+```{r}
+rm(sce_comp, sce_beads)
+gc()
+```
+
+
+# Treg re-clustering
+Here we take the Treg cells and re-cluster again to get finer details
+Code is the same as above, so less descriptions here
+```{r}
+sce_Treg = filterSCE(sce, cluster_id %in% c("CD4 T"), k = "merging1")
+```
+
+Here we are changing which markers to use for the clustering (instead of in the Excel sheet).
+First all markers are set to "state"
+Then the ones we want to use are change to "type".
+```{r}
+rowData(sce_Treg)$marker_class = "state"
+rowData(sce_Treg[c("CD4","CD39","Foxp3","PD1","Ki67","CTLA4","CD45RA","CCR7","cCasp3","TCF1","CFSE","Helios","OGDH","XBP1","GzmB","Puro","CD25", "CD98")])$marker_class = "type"
+```
+
+```{r}
+set.seed(my_seed)
+sce_Treg <- cluster(sce_Treg, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r fig.width = 10, fig.height=5}
+plotExprHeatmap(sce_Treg, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta28", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r fig.width = 10, fig.height=5}
+plotExprHeatmap(sce_Treg, 
+                features = "state",
+                by = "cluster_id", 
+                k = "meta28", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r}
+set.seed(my_seed)
+sce_Treg <- runDR(sce_Treg, 
+             dr = "UMAP", 
+             cells = 1000, 
+             features = "type",
+             n_neighbors = 10) 
+set.seed(my_seed)
+```
+
+```{r}
+plotDR(sce_Treg, dr = "UMAP", color_by = "meta28")
+```
+
+```{r}
+plotDR(sce_Treg, dr = "UMAP", color_by = "Foxp3")
+```
+
+```{r, fig.height=6, fig.width=16}
+#plotting only type markers
+plotDR(sce_Treg, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_Treg),
+       ncol =8
+       )
+```
+
+```{r, fig.height=6, fig.width=16}
+#plotting only state markers
+plotDR(sce_Treg, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_Treg),
+       ncol =9
+       )
+```
+
+### filter the sce to one without Tregs (sce_CD4), and one with Tregs 
+```{r}
+# sce_Treg_backup is the original all CD4 T cell sce
+sce_Treg_backup = sce_Treg
+
+sce_CD4 = filterSCE(sce_Treg, !(cluster_id %in% c("10","12","13","16","17","18")), k = "meta28")
+
+sce_Treg = filterSCE(sce_Treg, cluster_id %in% c("10","12","13","16","17","18"), k = "meta28")
+```
+
+```{r}
+plotDR(sce_Treg, dr = "UMAP", color_by = "meta28")
+plotDR(sce_CD4, dr = "UMAP", color_by = "meta28")
+```
+
+```{r}
+plotDR(sce_Treg, dr = "UMAP", color_by = "Foxp3")
+plotDR(sce_CD4, dr = "UMAP", color_by = "Foxp3")
+```
+
+```{r}
+plotDR(sce_Treg, dr = "UMAP", color_by = "Foxp3") + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 5) +
+  scale_fill_distiller(palette = "Spectral", direction = -1) +
+  theme_classic()
+plotDR(sce_CD4, dr = "UMAP", color_by = "Foxp3") + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 5) +
+  scale_fill_distiller(palette = "Spectral", direction = -1) +
+  theme_classic()
+```
+
+```{r}
+p = plotDR(sce_Treg_backup, dr = "UMAP", color_by = "meta28")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = meta28, fill = meta28)) +
+  geom_point_rast(aes(x, y, colour = meta28, fill = meta28), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_UMAP_CD4_meta28.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+
+```{r}
+p = plotDR(sce_Treg_backup, dr = "UMAP", color_by = "Foxp3")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  scale_fill_viridis() +
+  scale_color_viridis() +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="Foxp3"), colour=guide_legend(title="Foxp3", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_UMAP_CD4_Foxp3.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+## Merging of clusters into specific cell types
+Note! You have to manually make the merging table based on the above clustering
+```{r}
+merging_table <- read_excel("merging_table_Treg.xlsx")                             
+merging_table 
+sce_Treg_backup <- mergeClusters(sce_Treg_backup, k = "meta28", table = merging_table, id = "merging_Treg", overwrite = T)
+```
+
+```{r}
+p = plotDR(sce_Treg_backup, dr = "UMAP", color_by = "merging_Treg")
+col_order2 = col_order[c(16,11)]
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = merging_Treg, fill = merging_Treg)) +
+  geom_point_rast(aes(x, y, colour = merging_Treg, fill = merging_Treg), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell type"), colour=guide_legend(title="cell type", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_UMAP_CD4_Treg.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+## plotting heatmap after clustering
+```{r fig.width = 10, fig.height=6}
+peh = plotExprHeatmap(sce_Treg_backup, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging_Treg", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+peh
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_merging_Treg_heat.pdf",width=7,height=1.5,paper='special') 
+peh
+dev.off()
+```
+
+## Treg-re-clustering
+## gating CXCR5+
+```{r, fig.width=24, fig.height=16}
+left <- 1.7
+right <- 9
+lower <- -0.01
+upper <- 8
+
+gate = annotate("rect",xmin = left, xmax = right, ymin = lower, ymax = upper, fill = NA, linetype = 1, color = 'red')
+
+pg = plot_grid(
+  plotScatter(sce_Treg, c("Ho165Di", "Cd110Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Cd111Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Cd112Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Cd114Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Cd116Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "I127Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Ce140Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Pr141Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd142Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd143Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd144Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd145Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd146Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Sm147Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd148Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Sm149Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Nd150Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Eu151Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Sm152Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Eu153Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Sm154Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Gd155Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Gd156Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Gd157Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Gd158Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Tb159Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Gd160Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Dy161Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Dy162Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Dy163Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Dy164Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Er166Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Er167Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Er168Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Tm169Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Er170Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Yb171Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Yb172Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Yb173Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Yb174Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Lu175Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Yb176Di"), assay = "exprs", label = "both") + gate,
+  plotScatter(sce_Treg, c("Ho165Di", "Bi209Di"), assay = "exprs", label = "both") + gate
+)
+pg
+```
+
+#### print pdf
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_CXCR5_gating.pdf",width=2,height=2,paper='special') 
+plotScatter(sce_Treg, c("Ho165Di", "Dy162Di"), assay = "exprs", label = "both") + gate
+dev.off()
+```
+
+#### add label to the cells
+When happy with the gate above, can continue below, and add labels to the cells
+```{r}
+exMat = as.data.frame(t(sce_Treg@assays@data$exprs))
+
+cells <- exMat$CXCR5 > left 
+
+cells2 = as.character(cells)
+cells3 = str_replace(cells2, "TRUE", "CXCR5+")
+cells4 = str_replace(cells3, "FALSE", "CXCR5-")
+cells4 = as.factor(cells4)
+
+sce_Treg$CXCR5_gated = cells4
+```
+
+## continue gating remainder of cells into eTreg and nTreg
+```{r}
+sce_Tfr = filterSCE(sce_Treg, CXCR5_gated == "CXCR5+")
+sce_enTreg = filterSCE(sce_Treg, CXCR5_gated == "CXCR5-")
+```
+
+```{r}
+rowData(sce_enTreg)$marker_class = "state"
+rowData(sce_enTreg[c("Ki67","CD45RA","CFSE","CD25", "Foxp3", "CD39", "CCR6", "TCF1")])$marker_class = "type"
+```
+
+```{r}
+set.seed(my_seed)
+sce_enTreg <- cluster(sce_enTreg, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r fig.width = 10, fig.height=5}
+plotExprHeatmap(sce_enTreg, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta28", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r fig.width = 10, fig.height=5}
+plotExprHeatmap(sce_enTreg, 
+                features = "state",
+                by = "cluster_id", 
+                k = "meta28", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r}
+set.seed(my_seed)
+sce_enTreg <- runDR(sce_enTreg, 
+             dr = "UMAP", 
+             cells = 1000, 
+             features = "type",
+             n_neighbors = 10) 
+set.seed(my_seed)
+```
+
+```{r}
+plotDR(sce_enTreg, dr = "UMAP", color_by = "meta28")
+```
+
+```{r, fig.height=6, fig.width=8}
+#plotting only type markers
+plotDR(sce_enTreg, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_enTreg),
+       ncol =4
+       )
+```
+
+```{r, fig.height=10, fig.width=16}
+#plotting only state markers
+plotDR(sce_enTreg, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_enTreg),
+       ncol =9
+       )
+```
+
+## Merging of clusters into specific cell types
+Note! You have to manually make the merging table based on the above clustering
+```{r}
+merging_table <- read_excel("merging_table7.xlsx")                             
+merging_table 
+sce_enTreg <- mergeClusters(sce_enTreg, k = "meta28", table = merging_table, id = "merging7", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=6, fig.width=12}
+plot_grid(ncol = 3,
+  plotDR(sce_enTreg, dr = "UMAP", color_by = "meta28"),
+  plotDR(sce_enTreg, dr = "UMAP", color_by = "merging7"),
+  plotDR(sce_enTreg, dr = "UMAP", color_by = "CD45RA")
+  )
+```
+
+```{r}
+p = plotDR(sce_enTreg, dr = "UMAP", color_by = "meta28")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = meta28, fill = meta28)) +
+  geom_point_rast(aes(x, y, colour = meta28, fill = meta28), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell type"), colour=guide_legend(title="cell type", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_enTreg_meta28.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_enTreg, dr = "UMAP", color_by = "merging7")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = merging7, fill = merging7)) +
+  geom_point_rast(aes(x, y, colour = merging7, fill = merging7), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell type"), colour=guide_legend(title="cell type", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_enTreg_merging7.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_enTreg, dr = "UMAP", color_by = "CD45RA")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  scale_fill_viridis() +
+  scale_color_viridis() +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="CD45RA"), colour=guide_legend(title="CD45RA", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_enTreg_CD45RA.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+## plotting heatmap after clustering
+```{r fig.width = 10, fig.height=6}
+peh = plotExprHeatmap(sce_enTreg, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging7", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+peh
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_enTreg_merging7_heat.pdf",width=5.2,height=1.5,paper='special') 
+peh
+dev.off()
+```
+
+#### add info about subsets into cluster_codes
+```{r}
+df = as.data.frame(sce_enTreg@colData$cluster_id)
+lookup = sce_enTreg@metadata$cluster_codes
+new <- df  # create a copy of df
+
+# using lapply, loop over columns and match values to the look up table. store in "new".
+new[] <- lapply(df, function(x) lookup$merging7[match(x, lookup$som100)])
+
+sce_enTreg$subsets = new$`sce_enTreg@colData$cluster_id`
+```
+
+# CD4 T re-clustering
+```{r}
+rowData(sce_CD4)$marker_class = "state"
+rowData(sce_CD4[c("CXCR5","CCR7", "CD45RA", "CXCR3", "CD25", "Tbet", "CCR4", "CCR6", "CD98", "CD38", "TCF1", "CytC", "CFSE", "Ki67", "CyclinB1", "HLA_DR", "CD39")])$marker_class = "type"
+```
+
+```{r}
+set.seed(my_seed)
+sce_CD4 <- cluster(sce_CD4, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r fig.width = 10, fig.height=6}
+plotExprHeatmap(sce_CD4, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta30", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r fig.width = 10, fig.height=6}
+plotExprHeatmap(sce_CD4, 
+                features = "state",
+                by = "cluster_id", 
+                k = "meta30", 
+                m = "meta10",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r}
+set.seed(my_seed)
+sce_CD4 <- runDR(sce_CD4, 
+             dr = "UMAP", 
+             cells = 1000, 
+             features = "type",
+             n_neighbors = 10) 
+set.seed(my_seed)
+```
+
+```{r}
+plotDR(sce_CD4, dr = "UMAP", color_by = "meta30")
+```
+
+```{r, fig.height=8, fig.width=16}
+#plotting only type markers
+plotDR(sce_CD4, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_CD4),
+       ncol =6
+       )
+```
+
+```{r, fig.height=8, fig.width=16}
+#plotting only state markers
+plotDR(sce_CD4, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_CD4),
+       ncol =9
+       )
+```
+
+```{r}
+merging_table <- read_excel("merging_table2.xlsx")                             
+merging_table 
+sce_CD4 <- mergeClusters(sce_CD4, k = "meta30", table = merging_table, id = "merging2", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=8, fig.width=12}
+plot_grid(ncol = 2,
+  plotDR(sce_CD4, dr = "UMAP", color_by = "meta30"),
+  plotDR(sce_CD4, dr = "UMAP", color_by = "merging2")
+  )
+```
+
+```{r}
+p = plotDR(sce_CD4, dr = "UMAP", color_by = "meta30")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = meta30, fill = meta30)) +
+  geom_point_rast(aes(x, y, colour = meta30, fill = meta30), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cluster#"), colour=guide_legend(title="cluster#", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD4_meta30.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_CD4, dr = "UMAP", color_by = "merging2")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = merging2, fill = merging2)) +
+  geom_point_rast(aes(x, y, colour = merging2, fill = merging2), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="celltype"), colour=guide_legend(title="celltype", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD4_merging2.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+## plotting heatmap after clustering
+```{r fig.width = 10, fig.height=6}
+peh = plotExprHeatmap(sce_CD4, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging2", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+peh
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD4_merging2_heat.pdf",width=7,height=2,paper='special') 
+peh
+dev.off()
+```
+
+#### Add the info about cell types to the metadata
+```{r}
+df = as.data.frame(sce_CD4@colData$cluster_id)
+lookup = sce_CD4@metadata$cluster_codes
+new <- df  # create a copy of df
+
+# using lapply, loop over columns and match values to the look up table. store in "new".
+new[] <- lapply(df, function(x) lookup$merging2[match(x, lookup$som100)])
+sce_CD4$merging2 = new$`sce_CD4@colData$cluster_id`
+```
+
+```{r fig.width = 10, fig.height=4}
+plotExprHeatmap(sce_CD4, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging2", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+```{r fig.width = 16, fig.height=4}
+plotExprHeatmap(sce_CD4, 
+                features = "state",
+                by = "cluster_id", 
+                k = "merging2", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+# replace subsets by merging2
+```{r}
+sce_CD4$subsets = sce_CD4$merging2
+```
+
+
+## CD8 T re-clustering
+Same thing for CD8 T cells
+```{r}
+sce_CD8 = filterSCE(sce, cluster_id %in% c("CD8 T"), k = "merging1")
+```
+
+```{r}
+rowData(sce_CD8)$marker_class = "state"
+rowData(sce_CD8[c("CD45RA", "Ki67", "CD27", "CD38", "CFSE", "CCR7")])$marker_class = "type"
+```
+
+```{r}
+set.seed(my_seed)
+sce_CD8 <- cluster(sce_CD8, 
+               features = "type",
+               xdim = 10,
+               ydim = 10,
+               maxK = 30,
+               verbose = FALSE, 
+               seed = my_seed)   
+set.seed(my_seed)
+```
+
+```{r fig.width = 12, fig.height=6}
+plotExprHeatmap(sce_CD8, 
+                features = "type",
+                by = "cluster_id", 
+                k = "meta20", 
+                m = "meta20",
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F, 
+                bars = T,
+                row_clust = F,
+                col_clust = T)
+```
+
+defining CD8 naive (CD45RA+CCR7+)
+defining CD8 CM (CD45RA-CCR7+)
+defining CD8 EM (CD45RA-CCR7-)
+defining CD8 TEMRA (CD45RA+CCR7-)
+
+```{r}
+set.seed(my_seed)
+sce_CD8 = runDR(sce_CD8, 
+                  dr = "UMAP", 
+                  cells = 1000, 
+                  features = type_markers(sce_CD8),
+                  n_neighbors = 30,
+                  scale = T
+                  ) 
+set.seed(my_seed)
+```
+
+
+```{r}
+plotDR(sce_CD8, dr = "UMAP", color_by = "meta20")
+```
+
+```{r, fig.height=8,fig.width=12}
+plot_grid(ncol = 2,
+          plotDR(sce_CD8, dr = "UMAP", color_by = "CCR7"),
+          plotDR(sce_CD8, dr = "UMAP", color_by = "CD45RA")
+)
+```
+
+```{r, fig.height=8, fig.width=16}
+#plotting only type markers
+plotDR(sce_CD8, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_CD8),
+       ncol =6,
+       scale = T
+       )
+```
+
+
+```{r, fig.height=16, fig.width=16}
+#plotting only type markers
+plotDR(sce_CD8, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_CD8),
+       ncol =6
+       )
+```
+
+```{r}
+merging_table <- read_excel("merging_table3.xlsx")                             
+merging_table 
+sce_CD8 <- mergeClusters(sce_CD8, k = "meta20", table = merging_table, id = "merging3", overwrite = T)
+```
+
+#### Check how your cell type decisions look on the UMAP
+```{r, fig.height=8, fig.width=12}
+plot_grid(ncol = 2,
+  plotDR(sce_CD8, dr = "UMAP", color_by = "meta20"),
+  plotDR(sce_CD8, dr = "UMAP", color_by = "merging3")
+  )
+```
+
+```{r, fig.height=6,fig.width=12}
+plot_grid(ncol = 2,
+          plotDR(sce_CD8, dr = "UMAP", color_by = "CCR7"),
+          plotDR(sce_CD8, dr = "UMAP", color_by = "CD45RA")
+)
+```
+
+```{r}
+p = plotDR(sce_CD8, dr = "UMAP", color_by = "merging3")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = merging3, fill = merging3)) +
+  geom_point_rast(aes(x, y, colour = merging3, fill = merging3), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="celltype"), colour=guide_legend(title="celltype", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD8_merging3.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_CD8, dr = "UMAP", color_by = "meta20")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = meta20, fill = meta20)) +
+  geom_point_rast(aes(x, y, colour = meta20, fill = meta20), size =0.3, alpha = 0.8) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cluster#"), colour=guide_legend(title="cluster#", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD8_meta20.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_CD8, dr = "UMAP", color_by = "CD45RA")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  scale_fill_viridis() +
+  scale_color_viridis() +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="CD45RA"), colour=guide_legend(title="CD45RA", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD8_CD45RA.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+```{r}
+p = plotDR(sce_CD8, dr = "UMAP", color_by = "CCR7")
+
+col_order = CATALYST:::.cluster_cols
+pp = ggplot(p$data, aes(x, y, colour = value, fill = value)) +
+  geom_point_rast(aes(x, y, colour = value, fill = value), size =0.3, alpha = 0.8) +
+  scale_fill_viridis() +
+  scale_color_viridis() +
+  theme_minimal(base_size = 14) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="CCR7"), colour=guide_legend(title="CCR7", override.aes = list(size=5)))
+  
+pp
+```
+
+### save the figure 
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD8_CCR7.pdf",width=7,height=6,paper='special') 
+pp
+dev.off()
+```
+
+## plotting heatmap after clustering
+```{r fig.width = 10, fig.height=6}
+peh = plotExprHeatmap(sce_CD8, 
+                features = "type",
+                by = "cluster_id", 
+                k = "merging3", 
+                scale = "first", 
+                q = 0.01, 
+                perc = T, 
+                col_dend = F,
+                row_clust = F,
+                bars = T)
+peh
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240214_UMAP_CD8_merging3_heat.pdf",width=6,height=2,paper='special') 
+peh
+dev.off()
+```
+
+#### Add the info about cell types to the metadata
+```{r}
+df = as.data.frame(sce_CD8@colData$cluster_id)
+lookup = sce_CD8@metadata$cluster_codes
+new <- df  # create a copy of df
+
+# using lapply, loop over columns and match values to the look up table. store in "new".
+new[] <- lapply(df, function(x) lookup$merging3[match(x, lookup$som100)])
+sce_CD8$merging3 = new$`sce_CD8@colData$cluster_id`
+```
+
+# replace subsets by merging3
+```{r}
+sce_CD8$subsets = sce_CD8$merging3
+```
+
+
+```{r}
+STOP
+```
+
+
+switch to part 2 of the notebook
+We are switching notebook to speed R up
+The graphs made here slows R down.
+Do not restart R, but continue directly in PART2. That way the sce from PART1 is used in PART2
+

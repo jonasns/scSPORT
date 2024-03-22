@@ -1,0 +1,2624 @@
+---
+title: "240321_scSPOT_code_PART4"
+output: html_notebook
+---
+
+
+#### Load required packages
+```{r}
+# load required packages
+library(readxl)
+library(cowplot)
+library(CATALYST)
+library(diffcyt)
+library(ggplot2) 
+library(flowCore)
+library(reshape)
+library(ggrepel)
+library(premessa)
+library(flowCore)
+library(plyr)
+library(ggpubr)
+library(dplyr)
+library(stringr)
+library(RColorBrewer)
+library(ggrastr)
+library(pheatmap)
+library(matrixStats)
+library(MoMAColors)
+library(scran)
+library(viridis)
+library(rstatix)
+```
+
+```{r}
+sessionInfo()
+```
+
+## re-load sce
+```{r}
+sce_recombined = readRDS("~/Desktop/231102_sce_recombined_scSPORT_summary.rds")
+```
+
+#### Define the seed for the entire workflow
+```{r}
+#set.seed for the whole workflow, use my_seed from now on
+my_seed <- 1234
+set.seed(my_seed)
+```
+
+### redefine the type markers to get better separation of subsets
+```{r}
+rowData(sce_recombined[c("CD4","CD8","CD19","IgD","PDL1","CXCR5","CD86","CytC","CD11c","HLA_DR","PD1","CTLA4","CD45RA","CCR7","Helios","OGDH","XBP1","CD25", "CD98", "CCR6","CXCR3", "CCR4","CD27", "CD38")])$marker_class = "type"
+```
+
+### cluster_id needs to be present for filterSCE (even though it's not used)
+Here we just put everything to 1
+```{r}
+sce_recombined$cluster_id = 1
+```
+
+## density UMAPs
+To see if there is any difference +/- Tregs
+We remove Tregs as they otherwise would dominate the density UMAP
+```{r}
+sce_oi = filterSCE(sce_recombined, !(subsets %in% c("eTreg", "nTreg", "Tfr")))
+sce_oi = filterSCE(sce_oi, condition %in% c("stim_0x_Treg","stim_10x_eTreg"))
+```
+
+```{r, fig.height=5, fig.width=10}
+# run UMAP
+set.seed(my_seed)
+sce_oi <- runDR(sce_oi, 
+             dr = "UMAP", 
+             cells = 4000, 
+             features = "type",
+             n_neighbors = 15) 
+set.seed(my_seed)
+```
+
+```{r}
+# subset to plot in desired layers
+p = plotDR(sce_oi, dr = "UMAP", color_by = "subsets")
+subset_data = p$data
+subset_data1 = subset(subset_data, subsets %in% c("metab_lo"))
+subset_data2 = subset(subset_data, subsets %in% c("NK"))
+subset_data3 = subset(subset_data, !subsets %in% c("NK","metab_lo"))
+subset_data1$subsets <- factor(subset_data1$subsets, levels=c("metab_lo"))
+subset_data2$subsets <- factor(subset_data2$subsets, levels=c("NK"))
+subset_data3$subsets <- factor(subset_data3$subsets, levels=c("B_naive","B_mem","B_act","B_plasma","CD4_naive", "Th1","Th2","Th17","Tfh", "CD8_naive","CD8_CM","CD8_EM","CD8_TEMRA","myeloid_DRlo","myeloid_DRmi", "myeloid_DRhi"))
+
+```
+
+```{r}
+col_order = c(brewer.pal(9,"Greys")[c(4)],moma.colors("Smith", 1),brewer.pal(9,"Greens")[c(7)],"#ffe119",brewer.pal(9,"Greens")[c(2,9)], brewer.pal(9,"Blues")[c(2,4)],"#4363d8","#f032e6","#911eb4",brewer.pal(9,"Reds")[c(2,4)], "#e6194B", brewer.pal(9,"Reds")[c(8)], brewer.pal(9,"Purples")[c(4,6,8)])
+
+pp0 = ggplot(subset_data1, aes(x, y, colour = subsets, fill = subsets)) +
+  geom_point_rast(aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.8) +
+  geom_point_rast(data = subset_data2, aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.1) +
+  geom_point_rast(data = subset_data3, aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.1) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 20) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5))) 
+
+pp0
+```
+
+```{r, fig.height=16, fig.width=16}
+#plotting only type markers
+plotDR(sce_oi, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_oi),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+
+```{r, fig.height=10, fig.width=16}
+#plotting only state markers
+plotDR(sce_oi, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_oi),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+```{r}
+pdf("~/Desktop/231218_draft_figures/231219_UMAP.pdf",width=8,height=5,paper='special') 
+pp0
+dev.off()
+```
+
+
+```{r, fig.height=4, fig.width=10}
+p = plotDR(sce_oi, dr = "UMAP", color_by = "subsets", facet_by = "condition") +  
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) 
+
+p$layers[[1]]$aes_params$alpha = 0
+
+plo0 = p + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 10,linewidth = 0.3) +
+  scale_fill_distiller(palette = "Spectral", direction = -1) +
+  theme_classic() + ylim(-15,9) +xlim(-14,12)
+plo0
+```
+
+```{r}
+#print pdf
+pdf("~/Desktop/231030_draft_figures/231113_eTreg_density_UMAP.pdf",width=10,height=4,paper='special') 
+plo0
+dev.off()
+```
+
+## 240111 - What are the metab-lo cells
+```{r}
+metblo = filterSCE(sce_recombined, condition %in% c("stim_0x_Treg","stim_10x_eTreg", "stim_10x_nTreg", "stim_10x_Tfr"))
+metblo = filterSCE(metblo, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3"))) #donors not used in the subset comparisons
+
+# remove channels that has more than one marker
+sce_oi <- metblo[-which(rownames(metblo) %in% c("CD21_CD3","CD45RO_Dead")), ]
+```
+
+```{r}
+# check that we have all conditions for selected donors
+table(sce_oi$patient_id, sce_oi$condition)
+```
+
+### use findmarkers to compare metab-lo cells to all others
+```{r}
+# we need both the FC and the wilcoxon test FDR. So we run both wilcox and t and combine the results after.
+markers <- findMarkers(sce_oi, groups = sce_oi$subsets, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "wilcox", block = sce_oi$patient_id, log.p = T)
+markers1 = markers$metab_lo
+
+markers <- findMarkers(sce_oi, groups = sce_oi$subsets, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "t", block = sce_oi$patient_id, log.p = T)
+markers1_2 = markers$metab_lo
+
+markers1 = merge(markers1, markers1_2, by = markers1, by.x = 0, by.y = 0)
+```
+
+```{r, fig.height=5,fig.width=8}
+#### Plot a Volcano plot of findmarkers results
+vp = as.data.frame(markers1)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+# the name will be a combination of the cell type and the marker
+vp$name =  vp$Row.names
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, summary.stats.y>log(1.3,2) & log.FDR.x<(-1.30) )
+vp_sign_dn = subset(vp, summary.stats.y<(-log(1.3,2)) & log.FDR.x<(-1.30))
+vp_non_sign = subset(vp, log.FDR.x>(-1.30) | abs(summary.stats.y)<log(1.3,2))
+vp_name = subset(vp, abs(summary.stats.y)>log(1.3,2) & log.FDR.x<(-1.30))
+
+
+vp_plot4= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = summary.stats.y, y = -(log.FDR.x), size = abs(summary.stats.y)),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = summary.stats.y, y = -(log.FDR.x), size = abs(summary.stats.y)),
+      alpha = 0.7,
+      fill = "navy",
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = summary.stats.y, y = -(log.FDR.x), size = abs(summary.stats.y)),
+      alpha = 0.7,
+      fill = "darkred",
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = summary.stats.y, -(log.FDR.x), label=name),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="logFC", x = "logFC", y = "-log10(FDR)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("other cells                                   metab-lo")
+
+vp_plot4
+```
+
+```{r}
+pdf("~/Desktop/240110_draft_figures/240111_findmarkers_metab_lo.pdf",width=7,height=5,paper='special') 
+vp_plot4
+dev.off()
+```
+
+## 240111 - How does an original eTreg differ from a nTreg-derived eTreg. Compare with find markers
+```{r}
+sce_recombined = readRDS("~/Desktop/231102_sce_recombined_scSPORT_summary.rds")
+sce_recombined$cluster_id = 1
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_0x_Treg","stim_10x_eTreg", "stim_10x_nTreg", "stim_10x_Tfr"))
+sce_oi = filterSCE(sce_oi, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3"))) #donors not used in the subset comparisons
+sce_oi <- sce_oi[-which(rownames(sce_oi) %in% c("CD21_CD3","CD45RO_Dead")), ]
+sce_oi = filterSCE(sce_oi, subsets == "eTreg")
+```
+
+```{r}
+markers <- findMarkers(sce_oi, groups = sce_oi$condition, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "wilcox", block = sce_oi$patient_id, log.p = T)
+markers1 = markers$stim_10x_nTreg$stats.stim_10x_eTreg
+
+markers <- findMarkers(sce_oi, groups = sce_oi$condition, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "t", block = sce_oi$patient_id, log.p = T)
+markers1_2 = markers$stim_10x_nTreg$stats.stim_10x_eTreg
+
+markers1 = merge(markers1, markers1_2, by = markers1, by.x = 0, by.y = 0)
+```
+
+```{r, fig.height=5,fig.width=8}
+#### Plot a Volcano plot of findmarkers results
+vp = as.data.frame(markers1)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+# the name will be a combination of the cell type and the marker
+vp$name =  vp$Row.names
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, logFC>log(1.1,2) & log.FDR.x<(-1.30) )
+vp_sign_dn = subset(vp, logFC<(-log(1.1,2)) & log.FDR.x<(-1.30))
+vp_non_sign = subset(vp, log.FDR.x>(-1.30) | abs(logFC)<log(1.1,2))
+vp_name = subset(vp, abs(logFC)>log(1.1,2) & log.FDR.x<(-1.30))
+
+
+vp_plot4= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.7,
+      fill = "navy",
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.7,
+      fill = "darkred",
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = logFC, -(log.FDR.x), label=name),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="logFC", x = "logFC", y = "-log10(FDR)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("original eTreg                                   nTreg-derived eTreg")
+
+vp_plot4
+```
+
+```{r}
+## 240318 - export results
+write.table(vp, "~/Desktop/240318_neTreg_findmarkers.tbl")
+```
+
+```{r}
+plotPbExprs(sce_oi, k = "som100", features = c("Ki67", "CD38", "CFSE", "CTLA4"),  
+    group_by = "condition", color_by = "condition", ncol = 8, shape_by = "patient_id") + 
+  theme_bw(base_size = 18) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +         
+  scale_fill_manual(values = moma.colors("Smith", 4)) +
+  scale_color_manual(values = rep("black",4)) +
+  scale_shape_manual(values=c(21,22,23,24,25,12,10,7,6))
+```
+
+```{r}
+pdf("~/Desktop/240213_draft_figures/240213_findmarkers_eTreg_derived_from_nTreg.pdf",width=7,height=5,paper='special') 
+vp_plot4
+dev.off()
+```
+
+## 240111 - How does an original Tfr differ from a nTreg-derived Tfr Compare with find markers
+```{r}
+sce_recombined = readRDS("~/Dropbox/CIDER/Data/231024_scSPORT_summary_T0toT7/all_fcs/renamed/231102_sce_recombined_scSPORT_summary.rds")
+sce_recombined$cluster_id = 1
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_0x_Treg","stim_10x_eTreg", "stim_10x_nTreg", "stim_10x_Tfr"))
+sce_oi = filterSCE(sce_oi, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3"))) #donors not used in the subset comparisons
+sce_oi <- sce_oi[-which(rownames(sce_oi) %in% c("CD21_CD3","CD45RO_Dead")), ]
+sce_oi = filterSCE(sce_oi, subsets == "Tfr")
+```
+
+```{r}
+markers <- findMarkers(sce_oi, groups = sce_oi$condition, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "wilcox", block = sce_oi$patient_id, log.p = T)
+markers1 = markers$stim_10x_nTreg$stats.stim_10x_Tfr
+
+markers <- findMarkers(sce_oi, groups = sce_oi$condition, assay.type = "exprs", pval.type = "some", direction = "any", full.stats=TRUE, test.type = "t", block = sce_oi$patient_id, log.p = T)
+markers1_2 = markers$stim_10x_nTreg$stats.stim_10x_Tfr
+
+markers1 = merge(markers1, markers1_2, by = markers1, by.x = 0, by.y = 0)
+```
+
+```{r, fig.height=5,fig.width=8}
+#### Plot a Volcano plot of findmarkers results
+vp = as.data.frame(markers1)
+
+# zero expression may result in NAs which we remove
+vp = na.omit(vp)
+
+#remove CFSE and Ki67, as they are much more significant than others
+#vp <- vp[!(rownames(vp) %in% c("CFSE", "Ki67")), ]
+
+# the name will be a combination of the cell type and the marker
+vp$name =  vp$Row.names
+
+# here the code is similar to DA plots
+vp_sign_up = subset(vp, logFC>log(1.3,2) & log.FDR.x<(-1.30) )
+vp_sign_dn = subset(vp, logFC<(-log(1.3,2)) & log.FDR.x<(-1.30))
+vp_non_sign = subset(vp, log.FDR.x>(-1.30) | abs(logFC)<log(1.3,2))
+vp_name = subset(vp, abs(logFC)>log(1.3,2) & log.FDR.x<(-1.30))
+
+
+vp_plot4= ggplot() +
+  geom_point(
+      data = vp_non_sign,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.2,
+      fill = "grey",
+      color = "black",
+      pch = 21
+    ) +
+  geom_point(
+      data = vp_sign_up,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.7,
+      fill = "navy",
+      color = "black",
+      pch = 21
+    ) +
+    geom_point(
+      data = vp_sign_dn,
+      aes(x = logFC, y = -(log.FDR.x), size = abs(logFC)),
+      alpha = 0.7,
+      fill = "darkred",
+      color = "black",
+      pch = 21
+    ) +
+  geom_text_repel(
+      data = vp_name,
+      aes(x = logFC, -(log.FDR.x), label=name),
+      size = 5.5,
+      min.segment.length = 0, #use to always put a line
+      box.padding = unit(0.35, "lines"),
+      point.padding = unit(0.3, "lines"),
+      max.overlaps = 100
+        ) +
+    theme_bw(base_size = 14) +
+    labs(size="logFC", x = "logFC", y = "-log10(FDR)") +
+    guides(size=guide_legend(override.aes=list(fill="white"))) +
+    ggtitle("original Tfr                                   nTreg-derived Tfr")
+
+vp_plot4
+```
+
+```{r}
+plotPbExprs(sce_oi, k = "som100", features = c("CXCR5", "CD38", "CD45RA"),  
+    group_by = "condition", color_by = "condition", ncol = 8, shape_by = "patient_id") + 
+  theme_bw(base_size = 18) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +         
+  scale_fill_manual(values = moma.colors("Smith", 4)) +
+  scale_color_manual(values = rep("black",4)) +
+  scale_shape_manual(values=c(21,22,23,24,25,12,10,7,6))
+```
+
+```{r}
+pdf("~/Desktop/240110_draft_figures/240111_findmarkers_Tfr_derived_from_nTreg.pdf",width=7,height=5,paper='special') 
+vp_plot4
+dev.off()
+```
+
+## comparing Treg subsets
+## density UMAPs
+```{r}
+sce_recombined = readRDS("~/Dropbox/CIDER/Data/231024_scSPORT_summary_T0toT7/all_fcs/renamed/231102_sce_recombined_scSPORT_summary.rds")
+sce_recombined$cluster_id = 1
+rowData(sce_recombined[c("CD4","CD8","CD19","IgD","PDL1","CXCR5","CD86","CytC","CD11c","HLA_DR","PD1","CTLA4","CD45RA","CCR7","Helios","OGDH","XBP1","CD25", "CD98", "CCR6","CXCR3", "CCR4","CD27", "CD38")])$marker_class = "type"
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_0x_Treg","stim_10x_eTreg", "stim_10x_nTreg", "stim_10x_Tfr"))
+sce_oi = filterSCE(sce_oi, !(patient_id %in% c("T00_D1","T01_D1","T02_D1","T02_D2","T03_D1","T03_D3")))
+sce_oi = filterSCE(sce_oi, !(subsets %in% c("eTreg", "nTreg", "Tfr")))
+```
+
+```{r, fig.height=5, fig.width=10}
+# run UMAP
+set.seed(my_seed)
+sce_oi <- runDR(sce_oi, 
+             dr = "UMAP", 
+             cells = 4000, 
+             features = "type",
+             n_neighbors = 15) 
+set.seed(my_seed)
+```
+
+```{r}
+# subset to plot in desired layers
+p = plotDR(sce_oi, dr = "UMAP", color_by = "subsets")
+subset_data = p$data
+subset_data1 = subset(subset_data, subsets %in% c("metab_lo"))
+subset_data2 = subset(subset_data, subsets %in% c("NK"))
+subset_data3 = subset(subset_data, !subsets %in% c("NK","metab_lo"))
+subset_data1$subsets <- factor(subset_data1$subsets, levels=c("metab_lo"))
+subset_data2$subsets <- factor(subset_data2$subsets, levels=c("NK"))
+subset_data3$subsets <- factor(subset_data3$subsets, levels=c("B_naive","B_mem","B_act","B_plasma","CD4_naive", "Th1","Th2","Th17","Tfh", "CD8_naive","CD8_CM","CD8_EM","CD8_TEMRA","myeloid_DRlo","myeloid_DRmi", "myeloid_DRhi"))
+```
+
+```{r}
+col_order = c(brewer.pal(9,"Greys")[c(4)],moma.colors("Smith", 1),brewer.pal(9,"Greens")[c(7)],"#ffe119",brewer.pal(9,"Greens")[c(2,9)], brewer.pal(9,"Blues")[c(2,4)],"#4363d8","#f032e6","#911eb4",brewer.pal(9,"Reds")[c(2,4)], "#e6194B", brewer.pal(9,"Reds")[c(8)], brewer.pal(9,"Purples")[c(4,6,8)])
+
+pp0 = ggplot(subset_data1, aes(x, y, colour = subsets, fill = subsets)) +
+  geom_point_rast(aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.8) +
+  geom_point_rast(data = subset_data2, aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.1) +
+  geom_point_rast(data = subset_data3, aes(x, y, colour = subsets, fill = subsets), size =0.1, alpha = 0.1) +
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) +
+  theme_minimal(base_size = 20) + 
+  labs(y="UMAP dim2",x = "UMAP dim1") + 
+  guides(fill=guide_legend(title="cell types"), colour=guide_legend(title="cell types", override.aes = list(size=5))) 
+
+pp0
+```
+
+```{r, fig.height=16, fig.width=16}
+#plotting only type markers
+plotDR(sce_oi, 
+       dr = "UMAP", 
+       color_by = type_markers(sce_oi),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+
+```{r, fig.height=10, fig.width=16}
+#plotting only state markers
+plotDR(sce_oi, 
+       dr = "UMAP", 
+       color_by = state_markers(sce_oi),
+       ncol =6,
+       scale = T # set to false if you want to display the unscaled data
+       )
+```
+
+```{r}
+pdf("~/Desktop/240322_draft_figures/240322_UMAP_Treg_subsets.pdf",width=8,height=5,paper='special') 
+pp0
+dev.off()
+```
+
+
+```{r, fig.height=6, fig.width=10}
+p = plotDR(sce_oi, dr = "UMAP", color_by = "subsets", facet_by = "condition") +  
+  scale_fill_manual(values = col_order) +
+  scale_color_manual(values = col_order) 
+
+p$layers[[1]]$aes_params$alpha = 0
+
+plo0 = p + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 10,linewidth = 0.3) +
+  scale_fill_distiller(palette = "Spectral", direction = -1) +
+  theme_classic() + ylim(-16,11) +xlim(-13,11)
+plo0
+```
+
+
+```{r}
+pdf("~/Desktop/231213_draft_figures/231213_UMAP_Treg_subsets_density.pdf",width=8,height=5,paper='special') 
+plo0
+dev.off()
+```
+
+
+
+```{r, fig.width=12,fig.height=12}
+plotDR(sce_oi, dr = "UMAP", color_by = "subsets", facet_by = "patient_id") + stat_density_2d(geom = "polygon", contour = TRUE,
+                  aes(fill = after_stat(level)), colour = "black",
+                  bins = 12,linewidth = 0.3) +
+  scale_fill_distiller(palette = "Spectral", direction = -1) 
+```
+
+
+# aCTLA4 boxplots
+
+## re-load sce
+```{r}
+sce_recombined = readRDS("~/Desktop/231102_sce_recombined_scSPORT_summary.rds")
+rowData(sce_recombined[c("CD4","CD8","CD19","CyclinB1","IgD","PDL1","Tbet","CXCR5","Puro","CD86","CytC","CD11c","HLA_DR")])$marker_class = "type"
+sce_recombined$cluster_id = 1
+```
+
+```{r}
+#make a list of available subsets
+table(sce_recombined$subsets)
+snames = rownames(table(sce_recombined$subsets))
+
+sce_oi = filterSCE(sce_recombined, condition %in% c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+sce_oi = filterSCE(sce_oi, patient_id %in% c("T05_D1", "T05_D2","T06_D1", "T06_D2","T07_D1", "T07_D2"))
+
+# make a list containing the sample IDs
+sample_id_list = levels(sce_oi$sample_id)
+sample_id_list = as.data.frame(sample_id_list)
+sample_id_list$number = c(1:length(levels(sce_oi$sample_id)))
+sample_id_list
+```
+
+```{r}
+#Then order the samples as desired:
+sample_id_1 = sample_id_list[7,1]
+sample_id_2 = sample_id_list[1,1]
+sample_id_3 = sample_id_list[8,1]
+sample_id_4 = sample_id_list[2,1]
+sample_id_5 = sample_id_list[9,1]
+sample_id_6 = sample_id_list[3,1]
+sample_id_7 = sample_id_list[10,1]
+sample_id_8 = sample_id_list[4,1]
+sample_id_9 = sample_id_list[11,1]
+sample_id_10 = sample_id_list[5,1]
+sample_id_11 = sample_id_list[12,1]
+sample_id_12 = sample_id_list[6,1]
+
+
+sample_id_list3 = c(sample_id_1, sample_id_2, sample_id_3, sample_id_4, sample_id_5, sample_id_6, sample_id_7, sample_id_8, sample_id_9, sample_id_10, sample_id_11, sample_id_12)
+sample_id_list3
+```
+
+
+## boxplots of cell percentages
+```{r, fig.width=16, fig.height=16}
+# a couple of table processing steps
+x = sce_oi
+
+# get frequencies by cluster & sample
+dn_list = levels(x$patient_id)
+
+df_all <- data.frame()
+ns_all <- data.frame()
+for (i in c(1:length(dn_list))) {
+  dn = dn_list[i]
+  y = filterSCE(x, patient_id == dn)
+  ns <- table(
+        cluster_id = y$subsets, 
+        condition = y$condition)
+    
+    fq <- prop.table(ns, "condition") * 100
+    df <- as.data.frame(fq)
+    df$donor = dn
+    df_all <- rbind(df_all, df)
+    df2 <- as.data.frame(ns)
+    df2$donor = dn
+    ns_all <- rbind(ns_all, df2)
+}
+    
+# subset to make individual graphs of each celltype
+snames2 = c("eTreg","Th17","Th2", "CD8_EM", "myeloid_DRhi", "B_plasma")
+for(i in c(1:length(snames2))) {
+df_sub = subset(df_all, df_all$cluster_id == snames2[i])
+
+nam = paste0("df_list_",i) 
+assign(nam, melt(df_sub))
+}
+
+df_list_list = list()
+for(i in c(1:length(snames2))) {
+  df_list_list[i] = list(get(paste0("df_list_",i)))
+}
+
+# colour definition
+col_order = c(brewer.pal(9,"Greens")[6], brewer.pal(9,"Oranges")[6])    
+
+# plotting 
+for(i in c(1:length(snames2))) {
+  nam = paste0("g",i) 
+  df_list_list[[i]]$condition = factor(df_list_list[[i]]$condition, levels = c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+  g = ggplot(data = df_list_list[[i]],
+        aes(y = value, x = condition)) +
+        geom_boxplot(width = 0.8, guides = FALSE, outlier.size = 0, alpha = 1, color = "black") +# , fill = color_box) +
+        geom_line(aes(group = donor),alpha = 0.5) +
+        geom_point(aes(fill = condition), size = 2, alpha = 0.8, position = position_jitterdodge(), shape=21) +
+        scale_y_continuous(limits = c(0, max(df_list_list[[i]]$value))) +
+        theme_bw() +
+        labs(y= paste("%", snames[i], "of PBMCs"), x = "") +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order) +
+        xlab("") +
+        ylab("") +
+        theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+        theme(plot.margin = unit(c(0.2, 0.05, 0, -0.3), "cm")) 
+    
+        
+  assign(nam, g)
+
+}
+
+#put all plots into a list
+g_list = list()
+for(i in c(1:length(snames2))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+
+# plot every graph that was added to the list
+gridExtra::grid.arrange(grobs = g_list)
+```
+
+```{r}
+#print pdf
+pdf("~/Desktop/231214_draft_figures/CTLA4_flats/231214_box_percentages.pdf",width=4,height=1.2,paper='special') 
+gridExtra::grid.arrange(grobs = g_list, ncol = 5)
+dev.off()
+```
+
+
+## plot total number per sample instead
+```{r, fig.width=16, fig.height=16}
+df <- as.data.frame(ns_all)
+
+col_order = c(brewer.pal(9,"Greens")[6], brewer.pal(9,"Oranges")[6])    
+
+# subset to make individual graphs of each celltype
+for(i in c(1:length(snames2))) {
+df_sub = subset(df, df$cluster_id == snames2[i])
+
+nam = paste0("df_list_",i) 
+assign(nam, melt(df_sub))
+}
+
+#making a list of lists.
+df_list_list = list()
+for(i in c(1:length(snames2))) {
+  df_list_list[i] = list(get(paste0("df_list_",i)))
+}
+
+for(i in c(1:length(snames2))) {
+  nam = paste0("g",i) 
+  df_list_list[[i]]$condition = factor(df_list_list[[i]]$condition, levels = c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+  g = ggplot(data = df_list_list[[i]],
+        aes(y = value, x = condition)) +
+        geom_boxplot(width = 0.8, guides = FALSE, outlier.size = 0, alpha = 1, color = "black") +# , fill = color_box) +
+        geom_line(aes(group = donor),alpha = 0.5) +
+        geom_point(aes(fill = condition), size = 2, alpha = 0.8, position = position_jitterdodge(), shape=21) +
+        scale_y_continuous(limits = c(0, max(df_list_list[[i]]$value))) +
+        theme_bw() +
+        labs(y= paste("%", snames[i], "of PBMCs"), x = "") +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order) +
+        xlab("") +
+        ylab("") +
+        theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+    theme(plot.margin = unit(c(0.2, 0.05, 0, -0.3), "cm")) 
+        
+  assign(nam, g)
+
+}
+
+#put all plots into a list
+g_list = list()
+for(i in c(1:length(snames2))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+
+
+# plot every graph that was added to the list
+gridExtra::grid.arrange(grobs = g_list)
+```
+
+
+
+```{r}
+#print pdf
+pdf("~/Desktop/231214_draft_figures/CTLA4_flats/231214_box_numbers.pdf",width=4,height=1.2,paper='special') 
+gridExtra::grid.arrange(grobs = g_list, ncol = 5)
+dev.off()
+```
+
+
+## boxplots of marker expression
+```{r}
+sce_oi2 = filterSCE(sce_oi, subsets == "eTreg")
+pbe = plotPbExprs(sce_oi2,fun = "median", features = c("CFSE", "Ki67", "cCasp3", "CyclinB1", "CD98", "Puro"))
+pbed = pbe$data
+pbed = melt(pbed)
+```
+
+```{r}
+pbed$condition = factor(pbed$condition, levels = c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+my_comparisons = list(c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+
+g = ggplot(data = pbed,
+        aes(y = value, x = condition)) +
+        geom_boxplot(width = 0.8, outlier.size = 0, alpha = 1, color = "black") +# , fill = color_box) +
+        geom_line(aes(group = patient_id),alpha = 0.5) +
+        geom_point(aes(fill = condition), size = 2, alpha = 0.8, position = position_jitterdodge(), shape=21) +
+        theme_bw() +
+        labs(y= paste("%", snames[i], "of PBMCs"), x = "") +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order) +
+        facet_wrap(pbed$antigen, scales = "free", ncol = 6) +
+        scale_y_continuous(expand = c(0.1, 0.1), limits = c(0, NA)) +
+        xlab("") +
+        ylab("") +
+        theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+        theme(plot.margin = unit(c(0.2, 0, 0, -0.3), "cm")) 
+g
+```
+
+```{r}
+#print pdf
+pdf("~/Desktop/231214_draft_figures/CTLA4_flats/231214_marker_percentages_eTreg.pdf",width=4.5,height=1.6,paper='special') 
+g
+dev.off()
+```
+
+
+
+### CFSE overlay histograms
+```{r}
+## re-load sce
+sce_recombined = readRDS("~/Desktop/231102_sce_recombined_scSPORT_summary.rds")
+rowData(sce_recombined[c("CD4","CD8","CD19","CyclinB1","IgD","PDL1","Tbet","CXCR5","Puro","CD86","CytC","CD11c","HLA_DR")])$marker_class = "type"
+sce_recombined$cluster_id = 1
+```
+
+```{r}
+#make a list of available subsets
+table(sce_recombined$subsets)
+snames = rownames(table(sce_recombined$subsets))
+
+sce_oi = filterSCE(sce_recombined, condition %in% c("stim_10x_eTreg", "stim_0x_Treg"))
+
+# make a list containing the sample IDs
+sample_id_list = levels(sce_oi$sample_id)
+sample_id_list = as.data.frame(sample_id_list)
+sample_id_list$number = c(1:length(levels(sce_oi$sample_id)))
+sample_id_list
+```
+
+```{r}
+print(Sys.time())
+
+# selecting conditions to use
+sce_use = sce_oi
+moi_list = c("CFSE")
+doi_list = rownames(table(sce_use$patient_id))
+soi_list = c("B_naive","B_mem","B_act","B_plasma", "CD8_naive","CD8_CM","CD8_EM","CD8_TEMRA", "metab_lo", "myeloid_DRlo","myeloid_DRmi", "myeloid_DRhi", "NK","CD4_naive","Th1","Th2","Th17","Tfh", "nTreg","eTreg", "Tfr")
+
+# selecting colours
+col_order = c(brewer.pal(9,"Greens")[c(2)],"#ffe119",brewer.pal(9,"Greens")[c(7,9)],brewer.pal(9,"Reds")[c(2,4)],"#e6194B",brewer.pal(9,"Reds")[c(8)], brewer.pal(9,"Greys")[c(4)],brewer.pal(9,"Purples")[c(4,6,8)], moma.colors("Smith", 1), brewer.pal(9,"Blues")[c(2,4)], "#4363d8", "#f032e6","#911eb4", moma.colors("Smith", 3))
+scales::show_col(col_order)
+
+col_order1 = c(col_order[1], "black")
+col_order2 = c(col_order[2], "black")
+col_order3 = c(col_order[3], "black")
+col_order4 = c(col_order[4], "black")
+col_order5 = c(col_order[5], "black")
+col_order6 = c(col_order[6], "black")
+col_order7 = c(col_order[7], "black")
+col_order8 = c(col_order[8], "black")
+col_order9 = c(col_order[9], "black")
+col_order10 = c(col_order[10], "black")
+col_order11 = c(col_order[11], "black")
+col_order12 = c(col_order[12], "black")
+col_order13 = c(col_order[13], "black")
+col_order14 = c(col_order[14], "black")
+col_order15 = c(col_order[15], "black")
+col_order16 = c(col_order[16], "black")
+col_order17 = c(col_order[17], "black")
+col_order18 = c(col_order[18], "black")
+col_order19 = c(col_order[19], "black")
+col_order20 = c(col_order[20], "black")
+col_order21 = c(col_order[21], "black")
+
+# start of loops
+#unfortunately I could not find a better way to plot "classic" flow cytometry overlay graphs than below very repetitive code. Thank you for your understanding.
+for(k in c(1:length(doi_list))) {
+  doi = doi_list[k]
+  sce_use = filterSCE(sce_oi, patient_id == doi)
+  sample_id_list3 = levels(sce_use$sample_id)
+  
+for(i in c(1:length(moi_list))) {
+  moi = moi_list[i]
+  
+  nam1 = paste0("p",i) 
+  nam2 = paste0("po",i) 
+  nam3 = paste0("pi",i) 
+  nam4 = paste0("pu",i) 
+  nam5 = paste0("py",i) 
+  nam6 = paste0("px",i) 
+  nam7 = paste0("px7",i) 
+  nam8 = paste0("px8",i) 
+  nam9 = paste0("px9",i) 
+  nam10 = paste0("px10",i) 
+  nam11 = paste0("px11",i) 
+  nam12 = paste0("px12",i) 
+  nam13 = paste0("px13",i) 
+  nam14 = paste0("px14",i) 
+  nam15 = paste0("px15",i) 
+  nam16 = paste0("px16",i) 
+  nam17 = paste0("px17",i) 
+  nam18 = paste0("px18",i) 
+  nam19 = paste0("px19",i) 
+  nam20 = paste0("px20",i) 
+  nam21 = paste0("px21",i) 
+
+soi = soi_list[1]
+  
+if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp1 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test1  = as.data.frame(t(sce_temp1@assays@data$exprs))
+} else {
+  test1 = data.frame(value = c(rep(-1,5)), culture_condition = 1)
+}
+
+if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp2 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test2  = as.data.frame(t(sce_temp2@assays@data$exprs))
+} else {
+  test2 = data.frame(value = c(rep(-1,5)), culture_condition = 2)
+
+}
+
+soi = soi_list[2]
+
+if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp3 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test3  = as.data.frame(t(sce_temp3@assays@data$exprs))
+} else {
+  test3 = data.frame(value = c(rep(-1,5)), culture_condition = 3)
+}
+
+if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp4 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test4  = as.data.frame(t(sce_temp4@assays@data$exprs))
+} else {
+  test4 = data.frame(value = c(rep(-1,5)), culture_condition = 4)
+}
+
+soi = soi_list[3]
+
+if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp5 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test5  = as.data.frame(t(sce_temp5@assays@data$exprs))
+} else {
+  test5 = data.frame(value = c(rep(-1,5)), culture_condition = 5)
+}
+
+if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp6 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test6  = as.data.frame(t(sce_temp6@assays@data$exprs))
+} else {
+  test6 = data.frame(value = c(rep(-1,5)), culture_condition = 6)
+}
+
+soi = soi_list[4]
+
+if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp7 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test7  = as.data.frame(t(sce_temp7@assays@data$exprs))
+} else {
+  test7 = data.frame(value = c(rep(-1,5)), culture_condition = 7)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp8 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test8  = as.data.frame(t(sce_temp8@assays@data$exprs))
+} else {
+  test8 = data.frame(value = c(rep(-1,5)), culture_condition = 8)
+}
+
+soi = soi_list[5]
+  
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp9 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test9  = as.data.frame(t(sce_temp9@assays@data$exprs))
+} else {
+  test9 = data.frame(value = c(rep(-1,5)), culture_condition = 9)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp10 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test10  = as.data.frame(t(sce_temp10@assays@data$exprs))
+} else {
+  test10 = data.frame(value = c(rep(-1,5)), culture_condition = 10)
+}
+
+soi = soi_list[6]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp11 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test11  = as.data.frame(t(sce_temp11@assays@data$exprs))
+} else {
+  test11 = data.frame(value = c(rep(-1,5)), culture_condition = 11)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp12 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test12  = as.data.frame(t(sce_temp12@assays@data$exprs))
+} else {
+  test12 = data.frame(value = c(rep(-1,5)), culture_condition = 12)
+}
+
+soi = soi_list[7]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp13 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test13  = as.data.frame(t(sce_temp13@assays@data$exprs))
+} else {
+  test13 = data.frame(value = c(rep(-1,5)), culture_condition = 13)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp14 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test14  = as.data.frame(t(sce_temp14@assays@data$exprs))
+} else {
+  test14 = data.frame(value = c(rep(-1,5)), culture_condition = 14)
+}
+
+soi = soi_list[8]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp15 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test15  = as.data.frame(t(sce_temp15@assays@data$exprs))
+} else {
+  test15 = data.frame(value = c(rep(-1,5)), culture_condition = 15)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp16 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test16  = as.data.frame(t(sce_temp16@assays@data$exprs))
+} else {
+  test16 = data.frame(value = c(rep(-1,5)), culture_condition = 16)
+}
+
+soi = soi_list[9]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp17 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test17  = as.data.frame(t(sce_temp17@assays@data$exprs))
+} else {
+  test17 = data.frame(value = c(rep(-1,5)), culture_condition = 17)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp18 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test18  = as.data.frame(t(sce_temp18@assays@data$exprs))
+} else {
+  test18 = data.frame(value = c(rep(-1,5)), culture_condition = 18)
+}
+  
+soi = soi_list[10]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp19 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test19  = as.data.frame(t(sce_temp19@assays@data$exprs))
+} else {
+  test19 = data.frame(value = c(rep(-1,5)), culture_condition = 19)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp20 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test20  = as.data.frame(t(sce_temp20@assays@data$exprs))
+} else {
+  test20 = data.frame(value = c(rep(-1,5)), culture_condition = 20)
+}
+
+soi = soi_list[11]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp21 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test21  = as.data.frame(t(sce_temp21@assays@data$exprs))
+} else {
+  test21 = data.frame(value = c(rep(-1,5)), culture_condition = 21)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp22 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test22  = as.data.frame(t(sce_temp22@assays@data$exprs))
+} else {
+  test22 = data.frame(value = c(rep(-1,5)), culture_condition = 22)
+}
+  
+soi = soi_list[12]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp23 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test23  = as.data.frame(t(sce_temp23@assays@data$exprs))
+} else {
+  test23 = data.frame(value = c(rep(-1,5)), culture_condition = 23)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp24 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test24  = as.data.frame(t(sce_temp24@assays@data$exprs))
+} else {
+  test24 = data.frame(value = c(rep(-1,5)), culture_condition = 24)
+}
+
+soi = soi_list[13]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp25 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test25  = as.data.frame(t(sce_temp25@assays@data$exprs))
+} else {
+  test25 = data.frame(value = c(rep(-1,5)), culture_condition = 25)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp26 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test26  = as.data.frame(t(sce_temp26@assays@data$exprs))
+} else {
+  test26 = data.frame(value = c(rep(-1,5)), culture_condition = 26)
+}
+
+soi = soi_list[14]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp27 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test27  = as.data.frame(t(sce_temp27@assays@data$exprs))
+} else {
+  test27 = data.frame(value = c(rep(-1,5)), culture_condition = 27)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp28 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test28  = as.data.frame(t(sce_temp28@assays@data$exprs))
+} else {
+  test28 = data.frame(value = c(rep(-1,5)), culture_condition = 28)
+}
+
+soi = soi_list[15]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp29 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test29  = as.data.frame(t(sce_temp29@assays@data$exprs))
+} else {
+  test29 = data.frame(value = c(rep(-1,5)), culture_condition = 29)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp30 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test30  = as.data.frame(t(sce_temp30@assays@data$exprs))
+} else {
+  test30 = data.frame(value = c(rep(-1,5)), culture_condition = 30)
+}
+  
+soi = soi_list[16]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp31 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test31  = as.data.frame(t(sce_temp31@assays@data$exprs))
+} else {
+  test31 = data.frame(value = c(rep(-1,5)), culture_condition = 31)
+}
+
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp32 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test32  = as.data.frame(t(sce_temp32@assays@data$exprs))
+} else {
+  test32 = data.frame(value = c(rep(-1,5)), culture_condition = 32)
+}
+  
+soi = soi_list[17]
+  
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp33 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test33  = as.data.frame(t(sce_temp33@assays@data$exprs))
+} else {
+  test33 = data.frame(value = c(rep(-1,5)), culture_condition = 33)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp34 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test34  = as.data.frame(t(sce_temp34@assays@data$exprs))
+} else {
+  test34 = data.frame(value = c(rep(-1,5)), culture_condition = 34)
+}
+  
+soi = soi_list[18]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp35 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test35  = as.data.frame(t(sce_temp35@assays@data$exprs))
+} else {
+  test35 = data.frame(value = c(rep(-1,5)), culture_condition = 35)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp36 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test36  = as.data.frame(t(sce_temp36@assays@data$exprs))
+} else {
+  test36 = data.frame(value = c(rep(-1,5)), culture_condition = 36)
+}
+  
+soi = soi_list[19]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp37 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test37  = as.data.frame(t(sce_temp37@assays@data$exprs))
+} else {
+  test37 = data.frame(value = c(rep(-1,5)), culture_condition = 37)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp38 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test38  = as.data.frame(t(sce_temp38@assays@data$exprs))
+} else {
+  test38 = data.frame(value = c(rep(-1,5)), culture_condition = 38)
+}
+
+soi = soi_list[20]
+  
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp39 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test39  = as.data.frame(t(sce_temp39@assays@data$exprs))
+} else {
+  test39 = data.frame(value = c(rep(-1,5)), culture_condition = 39)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp40 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test40  = as.data.frame(t(sce_temp40@assays@data$exprs))
+} else {
+  test40 = data.frame(value = c(rep(-1,5)), culture_condition = 40)
+}
+  
+soi = soi_list[21]
+
+  if (table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[1] & sce_use$subsets == soi)) == 1) {
+    sce_temp41 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[1])
+    test41  = as.data.frame(t(sce_temp41@assays@data$exprs))
+} else {
+  test41 = data.frame(value = c(rep(-1,5)), culture_condition = 41)
+}
+  
+  if (table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)[2] >1 | length(table(sce_use$sample_id == sample_id_list3[2] & sce_use$subsets == soi)) == 1) {
+    sce_temp42 = filterSCE(sce_use, subsets == soi & sample_id == sample_id_list3[2])
+    test42  = as.data.frame(t(sce_temp42@assays@data$exprs))
+} else {
+  test42 = data.frame(value = c(rep(-1,5)), culture_condition = 42)
+}
+
+test1 = test1[[moi]]
+test1 = melt(test1)
+if (nrow(test1) == 0) {
+  test1 = data.frame(value = c(rep(-1,5)), culture_condition = 1)
+} else {
+  test1$culture_condition = 1
+}
+
+test2 = test2[[moi]]
+test2 = melt(test2)
+if (nrow(test2) == 0) {
+  test2 = data.frame(value = c(rep(-1,5)), culture_condition = 2)
+} else {
+  test2$culture_condition = 2
+}
+
+test3 = test3[[moi]]
+test3 = melt(test3)
+if (nrow(test3) == 0) {
+  test3 = data.frame(value = c(rep(-1,5)), culture_condition = 3)
+} else {
+  test3$culture_condition = 3
+}
+
+test4 = test4[[moi]]
+test4 = melt(test4)
+if (nrow(test4) == 0) {
+  test4 = data.frame(value = c(rep(-1,5)), culture_condition = 4)
+} else {
+  test4$culture_condition = 4
+}
+
+test5 = test5[[moi]]
+test5 = melt(test5)
+if (nrow(test5) == 0) {
+  test5 = data.frame(value = c(rep(-1,5)), culture_condition = 5)
+} else {
+  test5$culture_condition = 5
+}
+
+test6 = test6[[moi]]
+test6 = melt(test6)
+if (nrow(test6) == 0) {
+  test6 = data.frame(value = c(rep(-1,5)), culture_condition = 6)
+} else {
+  test6$culture_condition = 6
+}
+
+test7 = test7[[moi]]
+test7 = melt(test7)
+if (nrow(test7) == 0) {
+  test7 = data.frame(value = c(rep(-1,5)), culture_condition = 7)
+} else {
+  test7$culture_condition = 7
+}
+
+test8 = test8[[moi]]
+test8 = melt(test8)
+if (nrow(test8) == 0) {
+  test8 = data.frame(value = c(rep(-1,5)), culture_condition = 8)
+} else {
+  test8$culture_condition = 8
+}
+
+test9 = test9[[moi]]
+test9 = melt(test9)
+if (nrow(test9) == 0) {
+  test9 = data.frame(value = c(rep(-1,5)), culture_condition = 9)
+} else {
+  test9$culture_condition = 9
+}
+
+test10 = test10[[moi]]
+test10 = melt(test10)
+if (nrow(test10) == 0) {
+  test10 = data.frame(value = c(rep(-1,5)), culture_condition = 10)
+} else {
+  test10$culture_condition = 10
+}
+
+test11 = test11[[moi]]
+test11 = melt(test11)
+if (nrow(test11) == 0) {
+  test11 = data.frame(value = c(rep(-1,5)), culture_condition = 11)
+} else {
+  test11$culture_condition = 11
+}
+
+test12 = test12[[moi]]
+test12 = melt(test12)
+if (nrow(test12) == 0) {
+  test12 = data.frame(value = c(rep(-1,5)), culture_condition = 12)
+} else {
+  test12$culture_condition = 12
+}
+
+test13 = test13[[moi]]
+test13 = melt(test13)
+if (nrow(test13) == 0) {
+  test13 = data.frame(value = c(rep(-1,5)), culture_condition = 13)
+} else {
+  test13$culture_condition = 13
+}
+
+test14 = test14[[moi]]
+test14 = melt(test14)
+if (nrow(test14) == 0) {
+  test14 = data.frame(value = c(rep(-1,5)), culture_condition = 14)
+} else {
+  test14$culture_condition = 14
+}
+
+test15 = test15[[moi]]
+test15 = melt(test15)
+if (nrow(test15) == 0) {
+  test15 = data.frame(value = c(rep(-1,5)), culture_condition = 15)
+} else {
+  test15$culture_condition = 15
+}
+
+test16 = test16[[moi]]
+test16 = melt(test16)
+if (nrow(test16) == 0) {
+  test16 = data.frame(value = c(rep(-1,5)), culture_condition = 16)
+} else {
+  test16$culture_condition = 16
+}
+
+test17 = test17[[moi]]
+test17 = melt(test17)
+if (nrow(test17) == 0) {
+  test17 = data.frame(value = c(rep(-1,5)), culture_condition = 17)
+} else {
+  test17$culture_condition = 17
+}
+
+test18 = test18[[moi]]
+test18 = melt(test18)
+if (nrow(test18) == 0) {
+  test18 = data.frame(value = c(rep(-1,5)), culture_condition = 18)
+} else {
+  test18$culture_condition = 18
+}
+
+test19 = test19[[moi]]
+test19 = melt(test19)
+if (nrow(test19) == 0) {
+  test19 = data.frame(value = c(rep(-1,5)), culture_condition = 19)
+} else {
+  test19$culture_condition = 19
+}
+
+test20 = test20[[moi]]
+test20 = melt(test20)
+if (nrow(test20) == 0) {
+  test20 = data.frame(value = c(rep(-1,5)), culture_condition = 20)
+} else {
+  test20$culture_condition = 20
+}
+
+test21 = test21[[moi]]
+test21 = melt(test21)
+if (nrow(test21) == 0) {
+  test21 = data.frame(value = c(rep(-1,5)), culture_condition = 21)
+} else {
+  test21$culture_condition = 21
+}
+
+test22 = test22[[moi]]
+test22 = melt(test22)
+if (nrow(test22) == 0) {
+  test22 = data.frame(value = c(rep(-1,5)), culture_condition = 22)
+} else {
+  test22$culture_condition = 22
+}
+
+test23 = test23[[moi]]
+test23 = melt(test23)
+if (nrow(test23) == 0) {
+  test23 = data.frame(value = c(rep(-1,5)), culture_condition = 23)
+} else {
+  test23$culture_condition = 23
+}
+
+test24 = test24[[moi]]
+test24 = melt(test24)
+if (nrow(test24) == 0) {
+  test24 = data.frame(value = c(rep(-1,5)), culture_condition = 24)
+} else {
+  test24$culture_condition = 24
+}
+
+test25 = test25[[moi]]
+test25 = melt(test25)
+if (nrow(test25) == 0) {
+  test25 = data.frame(value = c(rep(-1,5)), culture_condition = 25)
+} else {
+  test25$culture_condition = 25
+}
+
+test26 = test26[[moi]]
+test26 = melt(test26)
+if (nrow(test26) == 0) {
+  test26 = data.frame(value = c(rep(-1,5)), culture_condition = 26)
+} else {
+  test26$culture_condition = 26
+}
+
+test27 = test27[[moi]]
+test27 = melt(test27)
+if (nrow(test27) == 0) {
+  test27 = data.frame(value = c(rep(-1,5)), culture_condition = 27)
+} else {
+  test27$culture_condition = 27
+}
+
+test28 = test28[[moi]]
+test28 = melt(test28)
+if (nrow(test28) == 0) {
+  test28 = data.frame(value = c(rep(-1,5)), culture_condition = 28)
+} else {
+  test28$culture_condition = 28
+}
+
+test29 = test29[[moi]]
+test29 = melt(test29)
+if (nrow(test29) == 0) {
+  test29 = data.frame(value = c(rep(-1,5)), culture_condition = 29)
+} else {
+  test29$culture_condition = 29
+}
+
+test30 = test30[[moi]]
+test30 = melt(test30)
+if (nrow(test30) == 0) {
+  test30 = data.frame(value = c(rep(-1,5)), culture_condition = 30)
+} else {
+  test30$culture_condition = 30
+}
+
+test31 = test31[[moi]]
+test31 = melt(test31)
+if (nrow(test31) == 0) {
+  test31 = data.frame(value = c(rep(-1,5)), culture_condition = 31)
+} else {
+  test31$culture_condition = 31
+}
+
+test32 = test32[[moi]]
+test32 = melt(test32)
+if (nrow(test32) == 0) {
+  test32 = data.frame(value = c(rep(-1,5)), culture_condition = 32)
+} else {
+  test32$culture_condition = 32
+}
+
+test33 = test33[[moi]]
+test33 = melt(test33)
+if (nrow(test33) == 0) {
+  test33 = data.frame(value = c(rep(-1,5)), culture_condition = 33)
+} else {
+  test33$culture_condition = 33
+}
+
+test34 = test34[[moi]]
+test34 = melt(test34)
+if (nrow(test34) == 0) {
+  test34 = data.frame(value = c(rep(-1,5)), culture_condition = 34)
+} else {
+  test34$culture_condition = 34
+}
+
+test35 = test35[[moi]]
+test35 = melt(test35)
+if (nrow(test35) == 0) {
+  test35 = data.frame(value = c(rep(-1,5)), culture_condition = 35)
+} else {
+  test35$culture_condition = 35
+}
+
+test36 = test36[[moi]]
+test36 = melt(test36)
+if (nrow(test36) == 0) {
+  test36 = data.frame(value = c(rep(-1,5)), culture_condition = 36)
+} else {
+  test36$culture_condition = 36
+}
+
+test37 = test37[[moi]]
+test37 = melt(test37)
+if (nrow(test37) == 0) {
+  test37 = data.frame(value = c(rep(-1,5)), culture_condition = 37)
+} else {
+  test37$culture_condition = 37
+}
+
+test38 = test38[[moi]]
+test38 = melt(test38)
+if (nrow(test38) == 0) {
+  test38 = data.frame(value = c(rep(-1,5)), culture_condition = 38)
+} else {
+  test38$culture_condition = 38
+}
+
+test39 = test39[[moi]]
+test39 = melt(test39)
+if (nrow(test39) == 0) {
+  test39 = data.frame(value = c(rep(-1,5)), culture_condition = 39)
+} else {
+  test39$culture_condition = 39
+}
+
+test40 = test40[[moi]]
+test40 = melt(test40)
+if (nrow(test40) == 0) {
+  test40 = data.frame(value = c(rep(-1,5)), culture_condition = 40)
+} else {
+  test40$culture_condition = 40
+}
+
+test41 = test41[[moi]]
+test41 = melt(test41)
+if (nrow(test41) == 0) {
+  test41 = data.frame(value = c(rep(-1,5)), culture_condition = 41)
+} else {
+  test41$culture_condition = 41
+}
+
+test42 = test42[[moi]]
+test42 = melt(test42)
+if (nrow(test42) == 0) {
+  test42 = data.frame(value = c(rep(-1,5)), culture_condition = 42)
+} else {
+  test42$culture_condition = 42
+}
+
+test.table.1 = rbind(test1, test2)
+test.table.2 = rbind(test3, test4)
+test.table.3 = rbind(test5, test6)
+test.table.4 = rbind(test7, test8)
+test.table.5 = rbind(test9, test10)
+test.table.6 = rbind(test11, test12)
+test.table.7 = rbind(test13, test14)
+test.table.8 = rbind(test15, test16)
+test.table.9 = rbind(test17, test18)
+test.table.10 = rbind(test19, test20)
+test.table.11 = rbind(test21, test22)
+test.table.12 = rbind(test23, test24)
+test.table.13 = rbind(test25, test26)
+test.table.14 = rbind(test27, test28)
+test.table.15 = rbind(test29, test30)
+test.table.16 = rbind(test31, test32)
+test.table.17 = rbind(test33, test34)
+test.table.18 = rbind(test35, test36)
+test.table.19 = rbind(test37, test38)
+test.table.20 = rbind(test39, test40)
+test.table.21 = rbind(test41, test42)
+
+names(test.table.1)[2] <- "culture_condition"
+names(test.table.2)[2] <- "culture_condition"
+names(test.table.3)[2] <- "culture_condition"
+names(test.table.4)[2] <- "culture_condition"
+names(test.table.5)[2] <- "culture_condition"
+names(test.table.6)[2] <- "culture_condition"
+names(test.table.7)[2] <- "culture_condition"
+names(test.table.8)[2] <- "culture_condition"
+names(test.table.9)[2] <- "culture_condition"
+names(test.table.10)[2] <- "culture_condition"
+names(test.table.11)[2] <- "culture_condition"
+names(test.table.12)[2] <- "culture_condition"
+names(test.table.13)[2] <- "culture_condition"
+names(test.table.14)[2] <- "culture_condition"
+names(test.table.15)[2] <- "culture_condition"
+names(test.table.16)[2] <- "culture_condition"
+names(test.table.17)[2] <- "culture_condition"
+names(test.table.18)[2] <- "culture_condition"
+names(test.table.19)[2] <- "culture_condition"
+names(test.table.20)[2] <- "culture_condition"
+names(test.table.21)[2] <- "culture_condition"
+
+test.table.1$culture_condition=as.factor(test.table.1$culture_condition)
+test.table.2$culture_condition=as.factor(test.table.2$culture_condition)
+test.table.3$culture_condition=as.factor(test.table.3$culture_condition)
+test.table.4$culture_condition=as.factor(test.table.4$culture_condition)
+test.table.5$culture_condition=as.factor(test.table.5$culture_condition)
+test.table.6$culture_condition=as.factor(test.table.6$culture_condition)
+test.table.7$culture_condition=as.factor(test.table.7$culture_condition)
+test.table.8$culture_condition=as.factor(test.table.8$culture_condition)
+test.table.9$culture_condition=as.factor(test.table.9$culture_condition)
+test.table.10$culture_condition=as.factor(test.table.10$culture_condition)
+test.table.11$culture_condition=as.factor(test.table.11$culture_condition)
+test.table.12$culture_condition=as.factor(test.table.12$culture_condition)
+test.table.13$culture_condition=as.factor(test.table.13$culture_condition)
+test.table.14$culture_condition=as.factor(test.table.14$culture_condition)
+test.table.15$culture_condition=as.factor(test.table.15$culture_condition)
+test.table.16$culture_condition=as.factor(test.table.16$culture_condition)
+test.table.17$culture_condition=as.factor(test.table.17$culture_condition)
+test.table.18$culture_condition=as.factor(test.table.18$culture_condition)
+test.table.19$culture_condition=as.factor(test.table.19$culture_condition)
+test.table.20$culture_condition=as.factor(test.table.20$culture_condition)
+test.table.21$culture_condition=as.factor(test.table.21$culture_condition)
+
+levels(test.table.1$culture_condition) <- c(levels(test.table.1$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.2$culture_condition) <- c(levels(test.table.2$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.3$culture_condition) <- c(levels(test.table.3$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.4$culture_condition) <- c(levels(test.table.4$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.5$culture_condition) <- c(levels(test.table.5$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.6$culture_condition) <- c(levels(test.table.6$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.7$culture_condition) <- c(levels(test.table.7$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.8$culture_condition) <- c(levels(test.table.8$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.9$culture_condition) <- c(levels(test.table.9$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.10$culture_condition) <- c(levels(test.table.10$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.11$culture_condition) <- c(levels(test.table.11$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.12$culture_condition) <- c(levels(test.table.12$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.13$culture_condition) <- c(levels(test.table.13$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.14$culture_condition) <- c(levels(test.table.14$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.15$culture_condition) <- c(levels(test.table.15$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.16$culture_condition) <- c(levels(test.table.16$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.17$culture_condition) <- c(levels(test.table.17$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.18$culture_condition) <- c(levels(test.table.18$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.19$culture_condition) <- c(levels(test.table.19$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.20$culture_condition) <- c(levels(test.table.20$culture_condition), sample_id_list3[1], sample_id_list3[2])
+levels(test.table.21$culture_condition) <- c(levels(test.table.21$culture_condition), sample_id_list3[1], sample_id_list3[2])
+
+test.table.1$culture_condition[test.table.1$culture_condition == "1"] <- sample_id_list3[1]
+test.table.1$culture_condition[test.table.1$culture_condition == "2"] <- sample_id_list3[2]
+
+test.table.2$culture_condition[test.table.2$culture_condition == "3"] <- sample_id_list3[1]
+test.table.2$culture_condition[test.table.2$culture_condition == "4"] <- sample_id_list3[2]
+
+test.table.3$culture_condition[test.table.3$culture_condition == "5"] <- sample_id_list3[1]
+test.table.3$culture_condition[test.table.3$culture_condition == "6"] <- sample_id_list3[2]
+
+test.table.4$culture_condition[test.table.4$culture_condition == "7"] <- sample_id_list3[1]
+test.table.4$culture_condition[test.table.4$culture_condition == "8"] <- sample_id_list3[2]
+
+test.table.5$culture_condition[test.table.5$culture_condition == "9"] <- sample_id_list3[1]
+test.table.5$culture_condition[test.table.5$culture_condition == "10"] <- sample_id_list3[2]
+
+test.table.6$culture_condition[test.table.6$culture_condition == "11"] <- sample_id_list3[1]
+test.table.6$culture_condition[test.table.6$culture_condition == "12"] <- sample_id_list3[2]
+
+test.table.7$culture_condition[test.table.7$culture_condition == "13"] <- sample_id_list3[1]
+test.table.7$culture_condition[test.table.7$culture_condition == "14"] <- sample_id_list3[2]
+
+test.table.8$culture_condition[test.table.8$culture_condition == "15"] <- sample_id_list3[1]
+test.table.8$culture_condition[test.table.8$culture_condition == "16"] <- sample_id_list3[2]
+
+test.table.9$culture_condition[test.table.9$culture_condition == "17"] <- sample_id_list3[1]
+test.table.9$culture_condition[test.table.9$culture_condition == "18"] <- sample_id_list3[2]
+
+test.table.10$culture_condition[test.table.10$culture_condition == "19"] <- sample_id_list3[1]
+test.table.10$culture_condition[test.table.10$culture_condition == "20"] <- sample_id_list3[2]
+
+test.table.11$culture_condition[test.table.11$culture_condition == "21"] <- sample_id_list3[1]
+test.table.11$culture_condition[test.table.11$culture_condition == "22"] <- sample_id_list3[2]
+
+test.table.12$culture_condition[test.table.12$culture_condition == "23"] <- sample_id_list3[1]
+test.table.12$culture_condition[test.table.12$culture_condition == "24"] <- sample_id_list3[2]
+
+test.table.13$culture_condition[test.table.13$culture_condition == "25"] <- sample_id_list3[1]
+test.table.13$culture_condition[test.table.13$culture_condition == "26"] <- sample_id_list3[2]
+
+test.table.14$culture_condition[test.table.14$culture_condition == "27"] <- sample_id_list3[1]
+test.table.14$culture_condition[test.table.14$culture_condition == "28"] <- sample_id_list3[2]
+
+test.table.15$culture_condition[test.table.15$culture_condition == "29"] <- sample_id_list3[1]
+test.table.15$culture_condition[test.table.15$culture_condition == "30"] <- sample_id_list3[2]
+
+test.table.16$culture_condition[test.table.16$culture_condition == "31"] <- sample_id_list3[1]
+test.table.16$culture_condition[test.table.16$culture_condition == "32"] <- sample_id_list3[2]
+
+test.table.17$culture_condition[test.table.17$culture_condition == "33"] <- sample_id_list3[1]
+test.table.17$culture_condition[test.table.17$culture_condition == "34"] <- sample_id_list3[2]
+
+test.table.18$culture_condition[test.table.18$culture_condition == "35"] <- sample_id_list3[1]
+test.table.18$culture_condition[test.table.18$culture_condition == "36"] <- sample_id_list3[2]
+
+test.table.19$culture_condition[test.table.19$culture_condition == "37"] <- sample_id_list3[1]
+test.table.19$culture_condition[test.table.19$culture_condition == "38"] <- sample_id_list3[2]
+
+test.table.20$culture_condition[test.table.20$culture_condition == "39"] <- sample_id_list3[1]
+test.table.20$culture_condition[test.table.20$culture_condition == "40"] <- sample_id_list3[2]
+
+test.table.21$culture_condition[test.table.21$culture_condition == "41"] <- sample_id_list3[1]
+test.table.21$culture_condition[test.table.21$culture_condition == "42"] <- sample_id_list3[2]
+
+#function for scaling
+#https://stackoverflow.com/questions/5665599/range-standardization-0-to-1-in-r
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.1, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order1[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam1, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.2, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order2[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam2, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.3, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order3[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam3, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.4, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order4[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam4, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.5, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order5[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam5, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.6, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order6[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam6, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.7, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order7[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam7, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.8, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order8[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam8, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.9, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order9[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam9, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.10, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order10[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam10, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.11, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order11[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam11, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.12, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order12[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam12, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.13, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order13[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam13, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.14, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order14[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam14, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.15, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order15[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam15, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.16, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order16[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam16, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.17, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order17[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam17, p)
+
+
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.18, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order18[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam18, p)
+
+
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.19, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order19[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam19, p)
+
+
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.20, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order20[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam20, p)
+
+#calculate the density depending on culture_condition
+res <- dlply(test.table.21, .(culture_condition), function(x) density(x$value))
+dd <- ldply(res, function(z){
+  data.frame(Values = z[["x"]], 
+             V1_density = range01(z[["y"]]))
+})
+
+#add an offset depending on "culture_condition"
+dd$offest=-as.numeric(dd$culture_condition)*0.0 # adapt the value as you need
+dd$V1_density_offest=dd$V1_density+dd$offest
+
+#plotting
+p = ggplot(dd, aes(Values, V1_density_offest, color=culture_condition)) +
+  geom_ribbon(data = subset(dd, culture_condition == levels(dd$culture_condition)[4]), aes(Values, ymin=offest,ymax=V1_density_offest),alpha=0.8, fill = col_order21[1], color = "black")+
+  geom_line(data = subset(dd, culture_condition == levels(dd$culture_condition)[3]), linetype = "twodash", color = "black", size = 1)+
+  scale_y_continuous(breaks=NULL) +
+  ylab("") +
+  xlab("") +
+  xlim(-0.5,7.5) +
+  theme_bw(base_size = 14) +
+  ggtitle("")  +
+  theme(plot.margin = unit(c(-0.75, 0, -1.1, -0.4), "cm")) + theme(legend.position = "none")
+
+assign(nam21, p)
+
+}
+
+pp_list1 = list()
+pp_list2 = list()
+pp_list3 = list()
+pp_list4 = list()
+pp_list5 = list()
+pp_list6 = list()
+pp_list7 = list()
+pp_list8 = list()
+pp_list9 = list()
+pp_list10 = list()
+pp_list11 = list()
+pp_list12 = list()
+pp_list13 = list()
+pp_list14 = list()
+pp_list15 = list()
+pp_list16 = list()
+pp_list17 = list()
+pp_list18 = list()
+pp_list19 = list()
+pp_list20 = list()
+pp_list21 = list()
+
+for(i in c(1:length(moi_list))) {
+  pp_list1[i] = list(get(paste0("p",i)))
+  pp_list2[i] = list(get(paste0("po",i)))
+  pp_list3[i] = list(get(paste0("pi",i)))
+  pp_list4[i] = list(get(paste0("pu",i)))
+  pp_list5[i] = list(get(paste0("py",i)))
+  pp_list6[i] = list(get(paste0("px",i)))
+  pp_list7[i] = list(get(paste0("px7",i)))
+  pp_list8[i] = list(get(paste0("px8",i)))
+  pp_list9[i] = list(get(paste0("px9",i)))
+  pp_list10[i] = list(get(paste0("px10",i)))
+  pp_list11[i] = list(get(paste0("px11",i)))
+  pp_list12[i] = list(get(paste0("px12",i)))
+  pp_list13[i] = list(get(paste0("px13",i)))
+  pp_list14[i] = list(get(paste0("px14",i)))
+  pp_list15[i] = list(get(paste0("px15",i)))
+  pp_list16[i] = list(get(paste0("px16",i)))
+  pp_list17[i] = list(get(paste0("px17",i)))
+  pp_list18[i] = list(get(paste0("px18",i)))
+  pp_list19[i] = list(get(paste0("px19",i)))
+  pp_list20[i] = list(get(paste0("px20",i)))
+  pp_list21[i] = list(get(paste0("px21",i)))
+
+pdf(paste0("~/Desktop/231218_draft_figures/CFSE_flats/231218_flats_all_subsets_beautify_",moi_list[i],"_", doi,".pdf"),width=10,height=5,paper='special') 
+print(plot_grid(ncol = 5,
+                pp_list1[[i]] ,
+                pp_list2[[i]],
+                pp_list3[[i]],
+                pp_list4[[i]], 
+                NA,
+                pp_list5[[i]], 
+                pp_list6[[i]], 
+                pp_list7[[i]], 
+                pp_list8[[i]],
+                NA,
+                pp_list9[[i]], 
+                pp_list10[[i]], 
+                pp_list11[[i]], 
+                pp_list12[[i]], 
+                pp_list13[[i]], 
+                pp_list14[[i]], 
+                pp_list15[[i]], 
+                pp_list16[[i]], 
+                pp_list17[[i]], 
+                pp_list18[[i]], 
+                pp_list19[[i]], 
+                pp_list20[[i]], 
+                pp_list21[[i]]), 
+      newpage = FALSE) 
+dev.off()
+}
+}
+  
+print(Sys.time())
+```
+
+
+
+# Cell cycle breakdown 
+```{r}
+sce_oi = filterSCE(sce_recombined, condition %in% c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+sce_oi = filterSCE(sce_oi, patient_id %in% c("T05_D1", "T05_D2","T06_D1", "T06_D2","T07_D1", "T07_D2"))
+sce_cc = filterSCE(sce_oi, subsets == "eTreg")
+```
+
+```{r}
+#cell cycle division markers
+plotPbExprs(sce_cc,fun = "mean", features = c("Ki67", "IdU", "CyclinB1"))
+```
+
+
+## gating Ki67-negative (G0) cells
+```{r}
+left <- 3.5
+right <- 9
+lower <- -0.01
+upper <- 8
+gate = annotate("rect",xmin = left, xmax = right, ymin = lower, ymax = upper, fill = NA, linetype = 1, color = 'red')
+
+ps = plotScatter(sce_cc, c("Er168Di", "Dy162Di"), assay = "exprs", label = "both") + gate
+ps
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_eTreg_ki67_gating.pdf",width=2,height=2,paper='special') 
+ps
+dev.off()
+```
+
+#### add label to the cells
+When happy with the gate above, can continue below, and add labels to the cells
+```{r}
+exMat = as.data.frame(t(sce_cc@assays@data$exprs))
+
+cells <- exMat$Ki67 > left 
+
+cells2 = as.character(cells)
+cells3 = str_replace(cells2, "TRUE", "Ki67+")
+cells4 = str_replace(cells3, "FALSE", "Ki67-")
+cells4 = as.factor(cells4)
+
+sce_cc$Ki67_gated = cells4
+```
+
+## split into G0 (Ki67-) and GX (Ki67+)
+```{r}
+sce_G0 = filterSCE(sce_cc, Ki67_gated == "Ki67-")
+
+sce_GX = filterSCE(sce_cc, Ki67_gated == "Ki67+")
+```
+
+## make gates for G1, S, and G2/M based on IdU
+```{r}
+left <- 2.5
+right <- 6.5
+lower <- 2
+upper <- 7
+
+gate = annotate("rect",xmin = left, xmax = right, ymin = lower, ymax = upper, fill = NA, linetype = 1, color = 'red')
+
+ps = plotScatter(sce_GX, c("Dy164Di", "I127Di"), assay = "exprs", label = "both") + gate
+ps
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_eTreg_IdU_gating.pdf",width=2,height=2,paper='special') 
+ps
+dev.off()
+```
+
+#### add label to the cells
+When happy with the gate above, can continue below, and add labels to the cells
+```{r}
+exMat = as.data.frame(t(sce_GX@assays@data$exprs))
+
+cells <- exMat$CyclinB1 < right & exMat$CyclinB1 > left & exMat$IdU > lower & exMat$IdU< upper
+
+cells2 = as.character(cells)
+cells3 = str_replace(cells2, "TRUE", "S")
+cells4 = str_replace(cells3, "FALSE", "notS")
+cells4 = as.factor(cells4)
+
+sce_GX$S_gated = cells4
+```
+
+## split into G0 (Ki67-) and GX (Ki67+)
+```{r}
+sce_S = filterSCE(sce_GX, S_gated == "S")
+
+sce_GX = filterSCE(sce_GX, S_gated == "notS")
+```
+
+```{r}
+left <- 4.7
+right <- 7.5
+lower <- 0.01
+upper <- 9
+
+gate = annotate("rect",xmin = left, xmax = right, ymin = lower, ymax = upper, fill = NA, linetype = 1, color = 'red')
+
+
+ps = plotScatter(sce_GX, c("Dy164Di", "Dy162Di"), assay = "exprs", label = "both") + gate
+ps
+```
+
+```{r}
+pdf("~/Desktop/240226_draft_figures/240226_eTreg_CyclinB1_gating.pdf",width=2,height=2,paper='special') 
+ps
+dev.off()
+```
+
+#### add label to the cells
+When happy with the gate above, can continue below, and add labels to the cells
+```{r}
+exMat = as.data.frame(t(sce_GX@assays@data$exprs))
+
+cells <- exMat$CyclinB1 < right & exMat$CyclinB1 > left
+
+cells2 = as.character(cells)
+cells3 = str_replace(cells2, "TRUE", "G2")
+cells4 = str_replace(cells3, "FALSE", "G1")
+cells4 = as.factor(cells4)
+
+sce_GX$G12_gated = cells4
+```
+
+## split into G1 and G2
+```{r}
+sce_G1 = filterSCE(sce_GX, G12_gated == "G1")
+
+sce_G2 = filterSCE(sce_GX, G12_gated == "G2")
+```
+
+## combine to one sce
+```{r}
+colData(sce_G0) = colData(sce_G0)[c(1:5)]
+colData(sce_G1) = colData(sce_G1)[c(1:5)]
+colData(sce_G2) = colData(sce_G2)[c(1:5)]
+colData(sce_S) = colData(sce_S)[c(1:5)]
+
+sce_G0$cc = "G0"
+sce_G1$cc = "G1"
+sce_G2$cc = "G2"
+sce_S$cc = "S"
+```
+
+
+```{r}
+#then combine the dataset like this:
+sce_recombined_cc = cbind(sce_G0,sce_G1,sce_G2,sce_S, deparse.level=1)
+```
+
+## plotting histograms
+```{r, fig.width=16, fig.height=16}
+# a couple of table processing steps
+x = sce_recombined_cc
+
+# get frequencies by cluster & sample
+dn_list = levels(x$patient_id)
+
+df_all <- data.frame()
+ns_all <- data.frame()
+for (i in c(1:length(dn_list))) {
+  dn = dn_list[i]
+  y = filterSCE(x, patient_id == dn)
+  ns <- table(
+        cluster_id = y$cc, 
+        condition = y$condition)
+    
+  
+    fq <- prop.table(ns, "condition") * 100
+    df <- as.data.frame(fq)
+    df$donor = dn
+    df_all <- rbind(df_all, df)
+    df2 <- as.data.frame(ns)
+    df2$donor = dn
+    ns_all <- rbind(ns_all, df2)
+}
+# subset to make individual graphs of each celltype
+snames2 = c("G0","G1","S", "G2")
+for(i in c(1:length(snames2))) {
+df_sub = subset(df_all, df_all$cluster_id == snames2[i])
+
+nam = paste0("df_list_",i) 
+assign(nam, melt(df_sub))
+}
+
+df_list_list = list()
+for(i in c(1:length(snames2))) {
+  df_list_list[i] = list(get(paste0("df_list_",i)))
+}
+
+# colour definition
+col_order = c(brewer.pal(9,"Greens")[6], brewer.pal(9,"Oranges")[6])    
+
+my_comparisons = list(c("aCTLA4_10x_eTreg", "IgG1_10x_eTreg"))
+
+# plotting 
+for(i in c(1:length(snames2))) {
+  nam = paste0("g",i) 
+  df_list_list[[i]]$condition = factor(df_list_list[[i]]$condition, levels = c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+  g = ggplot(data = df_list_list[[i]],
+        aes(y = value, x = condition)) +
+        geom_boxplot(width = 0.8, outlier.size = 0, alpha = 1, color = "black") +# , fill = color_box) +
+        geom_line(aes(group = donor),alpha = 0.5) +
+        geom_point(aes(fill = condition, shape = donor), size = 2, alpha = 0.8) +
+        scale_y_continuous(limits = c(0, max(df_list_list[[i]]$value))) +
+        theme_bw() +
+        labs(y= paste("%", snames[i], "of PBMCs"), x = "") +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order) +
+        scale_shape_manual(values=c(21, 22, 23,24,25, 8, 11, 12, 13)) +
+        xlab("") +
+        ylab("") +
+        theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+        
+  assign(nam, g)
+
+}
+
+#put all plots into a list
+g_list = list()
+for(i in c(1:length(snames2))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+
+# plot every graph that was added to the list
+gridExtra::grid.arrange(grobs = g_list)
+```
+
+```{r}
+#print pdf
+pdf("~/Desktop/240226_draft_figures/240226_eTreg_CTLA4_cell_cycle_breakdown.pdf",width=3.2,height=1.2,paper='special') 
+gridExtra::grid.arrange(grobs = g_list, ncol = 4)
+dev.off()
+```
+
+
+## stats on cell cycle
+
+## regular ttest
+first test for normality:
+```{r}
+df_all %>%
+  group_by(condition, cluster_id) %>%
+  shapiro_test(Freq)
+```
+
+they are all normal distributed, so we do a t.test: 
+```{r}
+# plotting 
+for(i in c(1:length(snames2))) {
+  nam = paste0("g",i) 
+  df_list_list[[i]]$condition = factor(df_list_list[[i]]$condition, levels = c("IgG1_10x_eTreg", "aCTLA4_10x_eTreg"))
+  g = ggplot(data = df_list_list[[i]],
+        aes(y = value, x = condition)) +
+        geom_boxplot(width = 0.8, outlier.size = 0, alpha = 1, color = "black") +# , fill = color_box) +
+        geom_line(aes(group = donor),alpha = 0.5) +
+        geom_point(aes(fill = condition, shape = donor), size = 2, alpha = 0.8) +
+        scale_y_continuous(limits = c(0, max(df_list_list[[i]]$value))) +
+        theme_bw() +
+        labs(y= paste("%", snames[i], "of PBMCs"), x = "") +
+        stat_compare_means(method = "t.test", paired = T) +
+        theme(axis.text.x=element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+        theme(legend.position="none") +
+        scale_fill_manual(values = col_order) +
+        scale_color_manual(values = col_order) +
+        scale_shape_manual(values=c(21, 22, 23,24,25, 8, 11, 12, 13)) +
+        xlab("") +
+        ylab("") +
+        theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) #+
+
+  assign(nam, g)
+
+}
+
+#put all plots into a list
+g_list = list()
+for(i in c(1:length(snames2))) {
+  g_list[i] = list(get(paste0("g",i)))
+}
+
+# plot every graph that was added to the list
+gridExtra::grid.arrange(grobs = g_list)
+```
